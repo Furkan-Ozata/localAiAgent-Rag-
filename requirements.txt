@@ -1,0 +1,15 @@
+langchain-core
+langchain-ollama
+langchain-text-splitters
+langchain-chroma
+langchain-community
+chromadb
+regex
+sentence-transformers
+peft
+accelerate
+bitsandbytes
+evaluate
+tqdm
+nltk
+TurkishStemmer
