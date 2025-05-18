@@ -10,6 +10,9 @@ from datetime import datetime
 from collections import defaultdict
 import concurrent.futures
 import re
+import subprocess
+import numpy as np
+import traceback
 
 # TurkishStemmer için güvenli import
 try:
@@ -17,6 +20,7 @@ try:
     stemmer = TurkishStemmer()
     STEMMER_AVAILABLE = True
     print("TurkishStemmer başarıyla yüklendi.")
+    print("Program çalışmaya devam ediyor...")
 except ImportError:
     print("TurkishStemmer bulunamadı. Basit stemming kullanılacak.")
     # Basit bir stemmer tanımla
@@ -35,21 +39,32 @@ except ImportError:
     STEMMER_AVAILABLE = False
 
 # Vector modülünü güvenli şekilde import et
+print("Vector modülü yükleniyor...")
 try:
     from vector import retriever, vectorstore
     VECTOR_DB_AVAILABLE = True
     print("Vektör veritabanı başarıyla yüklendi.")
-except ImportError:
-    print("UYARI: vector.py dosyası bulunamadı veya içe aktarılamadı.")
+except ImportError as e:
+    print(f"UYARI: vector.py dosyası bulunamadı veya içe aktarılamadı: {str(e)}")
     VECTOR_DB_AVAILABLE = False
     # Temel vector store tanımla
     retriever = None
     vectorstore = None
+except Exception as e:
+    print(f"UYARI: Vektör veritabanı yüklenirken hata oluştu: {str(e)}")
+    if "not found" in str(e) and "model" in str(e):
+        print("Embedding modeli bulunamadı. Lütfen vector.py dosyasını düzenleyerek uygun bir model seçin.")
+        print("Mevcut modelleri görmek için terminal'de 'ollama list' komutunu çalıştırın.")
+    VECTOR_DB_AVAILABLE = False
+    retriever = None
+    vectorstore = None
+    
+print("Vector modülü yükleme tamamlandı.")
 
 # Modeli oluştur - Daha iyi Türkçe yanıtlar için optimizasyonlar
 model = OllamaLLM(
     model="llama3.1", 
-    temperature=0.2,       # Tutarlı ama yaratıcı yanıtlar için hafif arttırıldı
+    temperature=0.5,       # Tutarlı ama yaratıcı yanıtlar için hafif arttırıldı
     top_p=0.92,            # Top-p örnekleme - biraz arttırıldı
     top_k=40,              # Top-k eklenedi - daha tutarlı yanıtlar için
     num_predict=2048,      # Yanıt uzunluğu
@@ -61,8 +76,7 @@ model = OllamaLLM(
     num_thread=8           # CPU thread sayısı belirtildi - paralel işlem için
 )
 
-# Konuşma geçmişi ve önbellek
-conversation_history = []
+# Önbellek
 query_cache = {}
 memory_cache = {}  # Hafıza önbelleği eklendi
 
@@ -90,117 +104,56 @@ def save_cache():
 # Önbelleği başlangıçta yükle
 query_cache = load_cache()
 
-# Sistem yönergesi - Geliştirilmiş Türkçe yanıtlar için
+# DERİN ANALİZ VE ÇOK KONULU, ESNEK YANIT PROMPTU
 system_instruction = """
-Sen Türkçe konuşma metinlerini analiz eden, akademik düzeyde yüksek bilgiye sahip bir yapay zeka asistanısın.
-Görevin, kullanıcının sorusuna verilen belge parçalarını kullanarak en doğru, açık ve kapsamlı yanıtı oluşturmaktır.
+Sen bir çok disiplinli transkript analiz uzmanısın. Görevin, SADECE verilen transkript belgelerindeki içeriklere dayanarak, çeşitli alanlarda sorulabilecek HER TÜRLÜ SORU için derinlemesine, düşündürücü ve öğretici bir analiz ile sentez sunmaktır.
 
-İŞLEVSEL PRENSİPLER:
-1. KESİNLİKLE SADECE verilen belgedeki içeriğe dayanarak yanıt ver.
-2. ASLA kendi bilgilerine, tahminlerine veya varsayımlarına dayanma.
-3. Verilen metinlerde bulunmayan bir konuda bilgi istenirse "Bu konuda metinlerde yeterli bilgi bulunmamaktadır" şeklinde dürüstçe belirt.
-4. Her zaman konuşmaların bağlamını, konuşmacıyı ve zaman damgalarını (örn: 00:15:30) belirt.
-5. Özel terimleri, rakamları ve alıntıları tam olarak kullan.
-6. Yanıtını sunmak için aşağıdaki yapıyı kullan:
-   - Özet yanıt (kısa ve öz, 1-3 cümle)
-   - Detaylar ve destekleyici bilgiler (ilgili alıntılar ve zamanlar ile)
-   - Konuşmacı perspektifleri (varsa farklı görüşler)
-   - Varsa önemli rakamlar, tarihler veya istatistikler
+KONU UZMANLIKLARIN:
+- EKONOMİ ve FİNANS: Makroekonomi, mikroekonomi, finansal piyasalar, kriptopara, borsa, yatırım analizleri
+- POLİTİKA ve ULUSLARARASI İLİŞKİLER: Siyasi gelişmeler, diplomatik ilişkiler, jeopolitik stratejiler, uluslararası kuruluşlar
+- TARİH ve TOPLUM: Tarihsel olaylar, toplumsal değişimler, kültürel dönüşümler, sosyal hareketler
+- BİLİM ve TEKNOLOJİ: Bilimsel gelişmeler, teknolojik yenilikler, inovasyon, yapay zeka, dijital dönüşüm
+- SANAT ve KÜLTÜR: Müzik, sinema, edebiyat, sanat akımları, eserler, sanatçılar, kültürel analizler
+- SAĞLIK ve PSİKOLOJİ: Tıbbi gelişmeler, sağlık tavsiyeleri, ruh sağlığı, psikolojik analizler
+- DİN ve FELSEFİ DÜŞÜNCE: Dini yorumlar, felsefi akımlar, etik tartışmalar, varoluşsal sorular
+- EĞİTİM ve KİŞİSEL GELİŞİM: Öğrenme metotları, kişisel gelişim stratejileri, beceri geliştirme
 
-ANALİZ KRİTERLERİ:
-1. Türkçe transkript içeriğinde geçen bilgileri doğru şekilde özetle
-2. Farklı konuşmacılar arasındaki fikir ayrılıklarını veya ortak görüşleri belirt
-3. Zaman sıralamasına dikkat et, olayların/konuşmaların kronolojisini koru
-4. Teknik veya özel terimleri açıkla (metinde açıklama varsa)
-5. Sorulara mümkün olduğunca doğrudan ve net yanıtlar ver
-
-KAÇINILMASI GEREKENLER:
-- ASLA uydurma veya belgelerde olmayan bilgi verme (en kritik kural budur)
-- Metinde olmayan kişiler, olaylar veya kavramlar hakkında yorum yapma
-- Politik veya ideolojik bir taraf tutma
-- Gereksiz tekrarlar ve aşırı uzatmalar
-- Yanıtı bulabildiğin konularda "bilgi yok" deme
-- Çok teknik veya karmaşık bir dil kullanmaktan kaçın, açık ve anlaşılır ol
+YAKLAŞIM KURALLARIM:
+- Her türlü soruyu (analiz, tahmin, karşılaştırma, eleştiri, yorumlama, açıklama) transkriptlerdeki bilgilere dayanarak cevaplayacağım.
+- YALNIZCA transkriptlerde geçen bilgilerle yanıt vereceğim. Dışarıdan bilgi, tahmin, genel kültür eklemeyeceğim.
+- Bilgileri sentezleyerek, karşılaştırarak, çelişkileri veya eksikleri belirterek detaylı analiz yapacağım.
+- Neden-sonuç ilişkisi, önemli noktalar, tekrar eden temalar, örtük anlamlar ve bağlamsal ipuçlarını vurgulayacağım.
+- Bilgi doğrudan yoksa, ilgili tüm bölümleri, dolaylı ve parçalı bilgileri birleştirerek mantıklı ve gerekçeli analiz sunacağım.
+- Kronolojik analiz gerektiren sorularda, olayların zaman sırasını ve gelişimini açıkça belirteceğim.
+- Kişisel görüş katmadan, objektif bir analizle yanıt vereceğim ve doğrudan alıntı kullanmayacağım.
+- Yanıtım her zaman şu yapıda olacak:
+  1. KONU ÖZETİ (Ana fikir ve kapsamı kısa sunma)
+  2. DERİN ANALİZ (Detaylı inceleme, karşılaştırma ve sentez)
+  3. SONUÇ (Kapsamlı çıkarım ve değerlendirme)
+  4. KAYNAKLAR [Kaynak: DOSYA_ADI, Zaman: ZAMAN_ARALIĞI]
+- Yeterli bilgi yoksa, "Bu konuda transkriptlerde yeterli bilgi bulunmamaktadır." diyeceğim.
 """
 
-# Doğrudan sorgulama template - Daha net yönergeler ve Türkçe iyileştirmeler
-query_template = system_instruction + """
+# SORGULAMA (YANIT ÜRETME) PROMPTU
+query_template = """
+{system_instruction}
 
-GÖREV:
-Kullanıcının sorusuna verilen belge parçalarına dayanarak kapsamlı bir yanıt hazırla.
-ÖNEMLİ: Yanıtın SADECE verilen metinlerdeki bilgilere dayanmalıdır.
+ANALİZ GÖREVİ:
+Kullanıcının sorduğu soruyu çok disiplinli bir analiz uzmanı olarak cevaplayacaksın. Aşağıdaki transkript parçaları senin bilgi kaynağındır. YALNIZCA bu kaynaklarda bulunan bilgileri kullanarak kapsamlı ve derinlemesine bir analiz sun. Doğrudan ve örtülü/dolaylı bilgileri sentezlemeye özen göster.
 
 SORU: {question}
 
-İLGİLİ BELGE PARÇALARI:
+TRANSKRİPT PARÇALARI:
 {context}
 
-ANALİZ TALİMATLARI:
-1. Verilen metinlere bakarak soruya en iyi yanıtı oluştur
-2. Yanıtı destekleyen noktaları ve konuşmacı perspektiflerini belirt
-3. Soru hakkında metinlerde bilgi yoksa açıkça belirt
-4. Türkçe dilbilgisi ve sözdizimi kurallarına dikkat et
-5. Yanıtta zaman damgaları ve konuşmacı bilgilerini mutlaka belirt
-6. Konuşma içindeki önemli alıntıları gerektiğinde tırnak içinde göster
-
-ÇIKTI FORMATI:
-- Öz Yanıt: Sorunun özet yanıtı (1-3 cümle)
-- Detaylar: Zaman damgaları ve konuşmacı bilgileriyle destekleyici bilgiler
-- Konuşmacı Görüşleri: Varsa farklı perspektifler
-- Özet Değerlendirme: Analizin özeti
-
-Yanıt:
+YANIT FORMATI:
+1. KONU ÖZETİ: Sorunu ve ana konuyu net şekilde tanımla.
+2. DERİN ANALİZ: Konuyu derinlemesine incele, farklı açılardan değerlendir, ilişkiler kur.
+3. SONUÇ: Bulgularını ve çıkarımlarını kapsamlı olarak özetle.
+4. KAYNAKLAR: Kullandığın transkript parçalarını dosya adı ve zaman bilgileriyle belirt.
 """
 
 # Soruyu iyileştirme - Türkçe dil desteği geliştirmeleri
-def enhance_question(question):
-    """Kullanıcı sorusunu model kullanarak daha net ve kapsamlı hale getir"""
-    
-    # Kısa sorular veya soru işaretiyle bitenler için doğrudan kabul et
-    if len(question) < 10 or question.endswith('?'):
-        return question
-    
-    # Türkçe soru yapısını iyileştir
-    template = """
-    {system_instruction}
-    
-    GÖREV: 
-    Aşağıdaki ifadeyi daha etkili bir sorguya dönüştür: "{question}"
-    
-    İyileştirme Kriterleri:
-    - Daha net ve spesifik olmalı
-    - Türkçe dil bilgisi kurallarına uygun olmalı
-    - Soru işareti ile bitmeli
-    - Anlam korunmalı
-    - Transkript analizine uygun olmalı
-    
-    Sadece geliştirilmiş soruyu ver, açıklama ekleme.
-    """
-    
-    enhance_prompt = ChatPromptTemplate.from_template(template)
-    
-    chain = (
-        RunnablePassthrough.assign(
-            system_instruction=lambda _: system_instruction,
-            question=lambda _: question
-        )
-        | enhance_prompt
-        | model
-        | StrOutputParser()
-    )
-    
-    try:
-        enhanced = chain.invoke({})
-        enhanced = enhanced.strip()
-        if enhanced and len(enhanced) > 5:
-            print(f"Soru iyileştirildi: {enhanced}")
-            return enhanced
-    except Exception as e:
-        print(f"Soru iyileştirme hatası: {e}")
-    
-    return question
-
-# Türkçe anahtar kelime çıkarıcı
 def extract_keywords(text):
     """Sorgudan anahtar kelimeleri çıkar ve kök haline dönüştür"""
     try:
@@ -260,17 +213,31 @@ def calculate_relevance(doc, keywords):
     
     # Anahtar kelime bazlı puanlama - geliştirilmiş
     keyword_matches = 0
+    keyword_match_positions = []
+    
     for keyword in keywords:
         # Tam eşleşme veya kelime sınırlarında eşleşme
         pattern = r'\b' + re.escape(keyword) + r'\b'
-        matches = re.findall(pattern, doc_text)
-        if matches:
+        matches = re.finditer(pattern, doc_text)
+        
+        match_count = 0
+        for match in matches:
+            match_count += 1
+            keyword_match_positions.append(match.start())
+        
+        if match_count > 0:
+            keyword_matches += 1
             # İlk eşleşmeler daha önemli
-            match_count = len(matches)
-            if match_count > 0:
-                keyword_matches += 1
-                # Bir kelime çok tekrarlanıyorsa ekstra puan verir (logaritmik)
-                score += 1.0 + (0.2 * min(match_count - 1, 5))
+            # Bir kelime çok tekrarlanıyorsa ekstra puan verir (logaritmik)
+            score += 1.0 + (0.2 * min(match_count - 1, 5))
+            
+            # Fiil kökü ise daha fazla puan ver
+            if hasattr(stemmer, '_check_verb_root') and callable(getattr(stemmer, '_check_verb_root')):
+                try:
+                    if stemmer._check_verb_root(keyword):
+                        score += 0.5  # Fiil kökleri daha önemli
+                except:
+                    pass
     
     # Eğer hiç eşleşme yoksa düşük bir değer dön
     if keyword_matches == 0 and keywords:
@@ -281,6 +248,22 @@ def calculate_relevance(doc, keywords):
     if doc_len > 50 and keyword_matches > 0:
         density = keyword_matches / (doc_len / 100)  # Her 100 karakter başına eşleşme
         score += min(density, 2.0)  # Maksimum 2.0 puan ekle
+    
+    # Eşleşen kelimelerin yakınlığı - birbirine yakın eşleşmeler daha değerli
+    if len(keyword_match_positions) > 1:
+        # Pozisyonları sırala
+        keyword_match_positions.sort()
+        
+        # Ardışık eşleşmeler arasındaki mesafeleri hesapla
+        distances = []
+        for i in range(1, len(keyword_match_positions)):
+            distance = keyword_match_positions[i] - keyword_match_positions[i-1]
+            distances.append(distance)
+        
+        # Ortalama mesafe - küçük olması daha iyi
+        avg_distance = sum(distances) / len(distances)
+        proximity_score = 1.0 / (1.0 + avg_distance / 100)  # Normalize edilmiş yakınlık puanı
+        score += proximity_score
     
     # Zamansal bilgiler
     if re.search(r'\d+:\d+:\d+', time_info):
@@ -296,7 +279,7 @@ def calculate_relevance(doc, keywords):
     if 5 <= mean_sentence_len <= 20:  # İdeal cümle uzunluğu
         score += 0.5
     
-    # İçeriğin genel kalitesi - metinde soru-cevap yapısı var mı?
+    # İçeriğin genel kalitesi - metin içinde soru-cevap yapısı var mı?
     if '?' in doc_text and len(doc_text) > 100:
         score += 0.5  # Muhtemelen bir soru-cevap var, bu faydalı olabilir
     
@@ -307,41 +290,72 @@ def calculate_relevance(doc, keywords):
 def format_sources(docs):
     sources_text = "=== KULLANILAN KAYNAKLAR ===\n"
     
-    # Dosya adına göre dokümanları grupla
-    file_docs = defaultdict(list)
-    for doc in docs:
-        source = doc.metadata.get("source", "Bilinmiyor")
-        file_docs[source].append(doc)
+    # Kullanılan dosyaları toplama ve grupla
+    source_groups = {}
     
-    for file_name, file_doc_list in file_docs.items():
-        sources_text += f"\n--- Dosya: {file_name} ---\n"
+    # Her bir dokümanı işle ve dosyalara göre grupla
+    for i, doc in enumerate(docs, 1):
+        source = doc.metadata.get("source", "Bilinmiyor")
         
-        speakers = set()
-        for doc in file_doc_list:
-            speakers.add(doc.metadata.get("speaker", "Bilinmiyor"))
+        # Zaman bilgisini doğrudan metadata'dan al
+        time_info = doc.metadata.get("time", "")
         
-        sources_text += f"Konuşmacılar: {', '.join(speakers)}\n"
-        sources_text += f"Toplam Parça Sayısı: {len(file_doc_list)}\n\n"
+        # Eğer time bilgisi yoksa veya varsayılan değerse, start_time ve end_time'ı kontrol et
+        if not time_info or time_info == "Bilinmiyor" or time_info == "00:00:00 - 00:00:00":
+            start_time = doc.metadata.get("start_time", "")
+            end_time = doc.metadata.get("end_time", "")
+            if start_time and end_time:
+                # Varsayılan değerleri kontrol et
+                if start_time != "00:00:00" or end_time != "00:00:00":
+                    time_info = f"{start_time} - {end_time}"
+                else:
+                    # İçerikte zaman bilgisi var mı kontrol et
+                    content = doc.page_content
+                    time_match = re.search(r"Time:\s*(\d+:\d+:\d+\s*-\s*\d+:\d+:\d+)", content)
+                    if time_match:
+                        time_info = time_match.group(1)
+                    else:
+                        time_info = "Zaman bilgisi yok"
+            else:
+                time_info = "Zaman bilgisi yok"
         
-        for i, doc in enumerate(file_doc_list[:3], 1):  # Sadece ilk 3 parçayı göster
-            speaker = doc.metadata.get("speaker", "Bilinmiyor")
-            time = doc.metadata.get("time", "Bilinmiyor")
-            
-            # İçeriği parse et
-            content_parts = doc.page_content.split("Content: ")
-            content = content_parts[1] if len(content_parts) > 1 else doc.page_content
-            
-            # Uzun içeriği kısalt
-            if len(content) > 200:
-                content = content[:197] + "..."
-            
-            sources_text += f"Parça {i}:\n"
-            sources_text += f"Konuşmacı: {speaker}\n"
-            sources_text += f"Zaman: {time}\n"
-            sources_text += f"İçerik: {content}\n\n"
+        # Konuşmacı bilgisini al
+        speaker = doc.metadata.get("speaker", "Bilinmiyor")
+        if speaker == "Bilinmiyor":
+            # İçerikte konuşmacı bilgisi var mı kontrol et
+            content = doc.page_content
+            speaker_match = re.search(r"Speaker:\s*([A-Za-z0-9]+)", content)
+            if speaker_match:
+                speaker = speaker_match.group(1)
         
-        if len(file_doc_list) > 3:
-            sources_text += f"... ve {len(file_doc_list) - 3} parça daha.\n"
+        # İçerik örneği (ilk 50 karakter)
+        content = doc.page_content.split('Content: ')[-1] if 'Content: ' in doc.page_content else doc.page_content
+        content_preview = content[:50] + "..." if len(content) > 50 else content
+        
+        # Dosya bazlı gruplama
+        if source not in source_groups:
+            source_groups[source] = []
+        
+        source_groups[source].append({
+            "index": i,
+            "time": time_info,
+            "speaker": speaker,
+            "content_preview": content_preview.replace("\n", " ")
+        })
+    
+    # Grupları formatlayarak göster
+    for source_name, entries in source_groups.items():
+        # Dosya başlığını göster
+        sources_text += f"\n📄 {source_name} ({len(entries)} parça):\n"
+        
+        # Her bir parçayı listele
+        for entry in entries:
+            sources_text += f"  {entry['index']}. Zaman: {entry['time']}, Konuşmacı: {entry['speaker']}\n"
+        
+        sources_text += "\n"
+    
+    # Toplam istatistik ekle
+    sources_text += f"\nToplam {len(docs)} transkript parçası kullanıldı, {len(source_groups)} farklı dosyadan."
     
     return sources_text
 
@@ -387,8 +401,9 @@ def clear_memory_cache():
 
 # Ana sorgulama fonksiyonu - Paralel çalışma ve önbellek iyileştirmeleri
 def query_transcripts(question):
-    """Ana sorgulama fonksiyonu - Artık daha verimli ve hata yönetimli"""
-    print("Sorgu işleniyor...")
+    """Ana sorgulama fonksiyonu - Performans optimizasyonlu"""
+    global system_instruction  # Global sistem talimatını kullan
+    print(f"Sorgu işleniyor: \"{question}\"")
     start_time = time.time()
     
     # Giriş kontrolü
@@ -396,135 +411,625 @@ def query_transcripts(question):
         return "Lütfen geçerli bir soru girin."
         
     # Vektör veritabanı kullanılabilir mi?
-    if not VECTOR_DB_AVAILABLE:
-        return "Vektör veritabanı kullanılamıyor. Lütfen vector.py dosyasının varlığını kontrol edin."
-    
-    # Soru önbellekte var mı kontrol et (disk ve bellek)
-    question_hash = hashlib.md5(question.encode()).hexdigest()
-    cache_key = f"query_{question_hash}"
-    
-    # Önce bellek önbelleğine bak (daha hızlı)
-    if cache_key in memory_cache:
-        print("Bu soru daha önce sorulmuş. Bellek önbelleğinden yanıt kullanılıyor...")
-        # Kullanım bilgisini güncelle
-        memory_cache[cache_key]['timestamp'] = time.time()
-        memory_cache[cache_key]['hits'] = memory_cache[cache_key].get('hits', 0) + 1
-        return memory_cache[cache_key]['result']
-    
-    # Sonra disk önbelleğine bak
-    if cache_key in query_cache:
-        print("Bu soru daha önce sorulmuş. Disk önbelleğinden yanıt kullanılıyor...")
-        result = query_cache[cache_key]
-        # Bellek önbelleğine ekle
-        memory_cache[cache_key] = {'result': result, 'timestamp': time.time(), 'hits': 1}
-        return result
+    if not VECTOR_DB_AVAILABLE or retriever is None:
+        return "Vektör veritabanı kullanılamıyor. Lütfen vector.py dosyasının varlığını kontrol edin ve uygun bir embedding modeli seçin."
     
     try:
-        # Soruyu iyileştir
-        enhanced_question = enhance_question(question)
+        # Performans izleme
+        stage_times = {}
         
         # Anahtar kelimeleri çıkar
+        kw_start = time.time()
         print("Anahtar kelimeler çıkarılıyor...")
-        keywords = extract_keywords(enhanced_question)
+        keywords = extract_keywords(question)
         if keywords:
             print(f"Çıkarılan anahtar kelimeler: {', '.join(keywords)}")
-        
+        stage_times["anahtar_kelimeler"] = time.time() - kw_start
+            
         # İlgili dokümanları getir
+        retrieval_start = time.time()
+        print("İlgili dokümanlar getiriliyor...")
         try:
-            print("İlgili dokümanlar getiriliyor...")
-            docs = retriever.invoke(enhanced_question)
+            # Retriever'ı optimize et - paralelleştirme ve geliştirilmiş sorgu ile
+            # MMR (Maximum Marginal Relevance) kullanarak çeşitliliği artır
+            search_type = retriever.search_kwargs.get("search_type", None)
+            fetch_k = retriever.search_kwargs.get("fetch_k", 50)
+            
+            if search_type != "mmr":
+                # MMR'yi etkinleştir - çeşitliliği artırır
+                retriever.search_kwargs["search_type"] = "mmr"
+                retriever.search_kwargs["fetch_k"] = max(fetch_k, 50)  # En az 50 doküman getir
+                retriever.search_kwargs["lambda_mult"] = 0.8  # Alaka-çeşitlilik dengesi
+            
+            # Dokümanları getir
+            docs = retriever.invoke(question)
+            
+            # --- GELİŞMİŞ ve OPTİMİZE EDİLMİŞ SIRALAMA: Anahtar kelime + embedding tabanlı semantik sıralama ---
+            def cosine_similarity(vec1, vec2):
+                import numpy as np
+                vec1 = np.array(vec1)
+                vec2 = np.array(vec2)
+                if np.linalg.norm(vec1) == 0 or np.linalg.norm(vec2) == 0:
+                    return 0.0
+                return float(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))
+            
+            # Paralelleştirme ile performans artışı
+            def parallel_score_documents():
+                # Belgeleri paralel olarak puanla
+                if keywords and hasattr(vectorstore, 'embed_query') and hasattr(vectorstore, 'embed_documents'):
+                    try:
+                        question_emb = vectorstore.embed_query(question)
+                        doc_texts = [doc.page_content for doc in docs]
+                        doc_embs = vectorstore.embed_documents(doc_texts)
+                        
+                        # Her belge için alaka puanını hesapla
+                        for i, doc in enumerate(docs):
+                            kw_score = calculate_relevance(doc, keywords)
+                            emb_score = cosine_similarity(question_emb, doc_embs[i])
+                            emb_score = max(emb_score, 0.0)
+                            kw_score_norm = min(max(kw_score / 2.0, 0.0), 1.0)
+                            
+                            # Optimize edilmiş puanlama formülü
+                            # Anahtar kelime ağırlığını artır ve benzerlik ağırlığını dengeleyerek daha iyi sonuç
+                            doc.final_score = 0.75 * kw_score_norm + 0.25 * emb_score
+                            
+                            # Konuşmacı puanlaması - eğer soruda belirli bir konuşmacı belirtilmişse
+                            if "speaker" in question.lower() and doc.metadata.get("speaker", "").lower() in question.lower():
+                                doc.final_score *= 1.5  # Konuşmacı eşleşirse fazladan puan
+                        
+                        return sorted(docs, key=lambda d: getattr(d, 'final_score', 0), reverse=True)
+                    except Exception as e:
+                        print(f"Gelişmiş sıralama uygulanamadı: {e}")
+                        return sorted(docs, key=lambda doc: calculate_relevance(doc, keywords), reverse=True) if keywords else docs
+                elif keywords:
+                    return sorted(docs, key=lambda doc: calculate_relevance(doc, keywords), reverse=True)
+                return docs
+            
+            # Sıralamayı uygula
+            docs = parallel_score_documents()
+            # --- SONU GELİŞMİŞ SIRALAMA ---
         except Exception as e:
             print(f"Doküman getirilirken hata: {e}")
-            return f"Veritabanından bilgi alınırken bir sorun oluştu: {str(e)}\nLütfen daha sonra tekrar deneyin."
+            error_msg = f"Veritabanından bilgi alınırken bir sorun oluştu: {str(e)}"
+            if "not found" in str(e) and "model" in str(e):
+                error_msg += "\n\nBu hata embedding modelinin bulunamadığını gösteriyor."
+                error_msg += "\nLütfen şu adımları izleyin:"
+                error_msg += "\n1. Terminal'de 'ollama list' komutu ile mevcut modelleri kontrol edin"
+                error_msg += "\n2. vector.py dosyasında kullanılan embedding modelini mevcut bir modelle değiştirin"
+                try:
+                    result = subprocess.run(['ollama', 'list'], capture_output=True, text=True)
+                    if result.returncode == 0 and result.stdout:
+                        error_msg += "\n\nMevcut modeller:"
+                        for line in result.stdout.split('\n')[:5]:
+                            if line.strip():
+                                error_msg += f"\n  {line}"
+                except Exception:
+                    pass
+            return error_msg
+        
+        stage_times["dokuman_getirme"] = time.time() - retrieval_start
         
         # Doküman bulunamadıysa bildir
         if not docs:
             no_docs_message = "Bu soruyla ilgili bilgi bulunamadı. Lütfen farklı bir soru sorun veya daha genel bir ifade kullanın."
-            # Yine de önbelleğe kaydet
-            query_cache[cache_key] = no_docs_message
-            memory_cache[cache_key] = {'result': no_docs_message, 'timestamp': time.time(), 'hits': 1}
             return no_docs_message
         
         print(f"Toplam {len(docs)} ilgili belge parçası bulundu")
         
-        # Dokümanları alaka puanına göre yeniden sırala
-        if keywords:
-            print("Dokümanlar alaka puanına göre sıralanıyor...")
-            docs = sorted(docs, key=lambda doc: calculate_relevance(doc, keywords), reverse=True)
+        # Belge filtreleme ve hazırlama
+        filtering_start = time.time()
+        
+        # Filtreleme ve çeşitleme stratejileri uygula
+        # İlk 70 dokümanı al (en alakalı olanları)
+        filtered_docs = docs[:70]
+        
+        # Sorgu tipini algılama - özel işleme stratejileri
+        is_chronological = any(word in question.lower() for word in ["kronoloji", "zaman", "sıra", "gelişme", "tarihsel", "süreç"])
+        is_speaker_specific = "speaker" in question.lower() or "konuşmacı" in question.lower()
+        is_comparison = any(word in question.lower() for word in ["karşılaştır", "fark", "benzerlik", "benzer", "farklı"])
+        
+        # Kronolojik analiz için belgeleri zaman sırasına diz
+        if is_chronological:
+            print("Kronolojik analiz yapılıyor...")
+            filtered_docs = sort_documents_chronologically(filtered_docs)
+        
+        # Konuşmacı spesifik analiz için filtreleme
+        if is_speaker_specific:
+            speaker_matches = []
+            for speaker_letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                if f"speaker {speaker_letter.lower()}" in question.lower() or f"speaker {speaker_letter}" in question.lower():
+                    speaker_matches.append(speaker_letter)
+            
+            if speaker_matches:
+                print(f"Konuşmacı analizi yapılıyor: {', '.join(speaker_matches)}")
+                # İlgili konuşmacıların belgelerini başa al
+                speaker_docs = [doc for doc in filtered_docs if doc.metadata.get("speaker", "").upper() in speaker_matches]
+                other_docs = [doc for doc in filtered_docs if doc.metadata.get("speaker", "").upper() not in speaker_matches]
+                filtered_docs = speaker_docs + other_docs[:max(35, 70-len(speaker_docs))]
+        
+        # Karşılaştırma analizi için belge çeşitliliğini artır
+        if is_comparison:
+            print("Karşılaştırma analizi yapılıyor...")
+            # Farklı konuşmacılardan belgeleri dengeli şekilde dahil et
+            speaker_groups = {}
+            for doc in filtered_docs:
+                speaker = doc.metadata.get("speaker", "Unknown")
+                if speaker not in speaker_groups:
+                    speaker_groups[speaker] = []
+                speaker_groups[speaker].append(doc)
+            
+            # Her konuşmacıdan dengeli sayıda belge seç
+            balanced_docs = []
+            max_per_speaker = 15  # Her konuşmacıdan maksimum belge sayısı
+            
+            # En alakalı konuşmacıları sırala (belge sayısına göre)
+            sorted_speakers = sorted(speaker_groups.keys(), key=lambda s: len(speaker_groups[s]), reverse=True)
+            
+            for speaker in sorted_speakers:
+                # Her konuşmacıdan en alakalı belgeleri ekle
+                balanced_docs.extend(speaker_groups[speaker][:max_per_speaker])
+            
+            # Maksimum belge sayısına kadar doldur
+            filtered_docs = balanced_docs[:70]
+            
+        stage_times["filtreleme"] = time.time() - filtering_start
+            
+        # Prompt hazırlama
+        prompt_start = time.time()
         
         # Doğrudan dokümanlar üzerinden sorgulama yap
         query_prompt = ChatPromptTemplate.from_template(query_template)
         
-        # En alakalı dokümanları birleştir (ilk 12 doküman)
-        context = "\n\n".join([doc.page_content for doc in docs[:12]])
+        # Çeşitliliği artırılmış, en alakalı dokümanları birleştir
+        # Geliştirilmiş içerik formatlama - dokümanları daha düzenli hale getir
+        context_parts = []
+        for i, doc in enumerate(filtered_docs, 1):
+            # Dosya adını kısalt
+            source = doc.metadata.get('source', 'Bilinmiyor')
+            if len(source) > 40:  # Uzun dosya adlarını kısalt
+                source = source[:37] + "..."
+            
+            # Zaman bilgisini doğru şekilde biçimlendir
+            time_info = doc.metadata.get('time', '')
+            if not time_info or time_info == "00:00:00 - 00:00:00":
+                start_time = doc.metadata.get('start_time', '')
+                end_time = doc.metadata.get('end_time', '')
+                if start_time and end_time:
+                    time_info = f"{start_time} - {end_time}"
+              # İçeriği temizle ve biçimlendir - güvenli şekilde
+            try:
+                # İçerik alınamadığında varsayılan değerler kullan
+                if not hasattr(doc, 'page_content') or doc.page_content is None:
+                    content = "Belge içeriği alınamadı"
+                else:
+                    content = doc.page_content
+                    if 'Content: ' in content:
+                        content = content.split('Content: ')[-1]
+                    content = content.strip()
+                
+                # İçeriği belirli bir uzunluğa kısalt (çok uzun belgeleri kırp)
+                if len(content) > 1000:
+                    content = content[:997] + "..."
+            except Exception as content_e:
+                print(f"İçerik işlenirken hata: {content_e}")
+                # Hata durumunda varsayılan bir değer belirle
+                content = "Belge içeriği işlenirken hata oluştu"
+            
+            # Belge parçasını biçimlendir
+            context_part = f"[Belge {i}]\nDosya: {source}\nZaman: {time_info}\nKonuşmacı: {doc.metadata.get('speaker', 'Bilinmiyor')}\nİçerik: {content}"
+            context_parts.append(context_part)
+          # Bağlamı birleştir
+        context = "\n\n".join(context_parts)
         
-        # Sorgulama zinciri
-        chain = (
-            RunnablePassthrough.assign(
-                question=lambda _: enhanced_question,
-                context=lambda _: context
-            )
-            | query_prompt
-            | model
-            | StrOutputParser()
-        )
+        stage_times["prompt_hazirlama"] = time.time() - prompt_start
         
-        print("LLM yanıtı alınıyor...")
-        # LLM yanıtını al - zaman aşımı ekle
+        # Her sorgu için sistem talimatının bir kopyasını oluştur
+        # Bu şekilde global değişken değiştirilmeyecek
+        query_system_instruction = system_instruction
+          # Özel sorgu tipi algılama ve prompt özelleştirme
+        if is_chronological:
+            # Kronolojik analiz için sistem talimatını güçlendir
+            query_system_instruction += "\n\nBu sorguda KRONOLOJİK ANALİZ yapmalısın. Olayların zaman sırasına göre gelişimini adım adım açıkla. Her aşamayı tarih/zaman bilgisiyle birlikte sunarak olayların nasıl ilerlediğini göster."
+        
+        if is_speaker_specific:
+            # Konuşmacı analizi için sistem talimatını özelleştir
+            query_system_instruction += f"\n\nBu sorguda KONUŞMACI ANALİZİ yapmalısın. Belirtilen konuşmacının (Speaker) görüşlerini, ifadelerini ve yaklaşımlarını detaylı olarak ele al. Konuşmacının bakış açısını ve diğerlerinden farkını vurgula."
+            
+        if is_comparison:
+            # Karşılaştırma analizi için sistem talimatını özelleştir
+            query_system_instruction += f"\n\nBu sorguda KARŞILAŞTIRMA ANALİZİ yapmalısın. Farklı fikirleri, yaklaşımları veya konuşmacıları karşılaştırarak benzerlik ve farklılıkları ortaya koy. Ortak noktaları ve ayrışmaları tablolama yapmadan açıkça belirt."
+              # Sorgulama zinciri - Değişken kapanma (closure) sorununu önlemek için güvenli yaklaşım
+        # Lambda yerine doğrudan değerleri kullan
+        input_values = {
+            "system_instruction": query_system_instruction,
+            "question": question,
+            "context": context
+        }
+        
+        # Basitleştirilmiş zincir oluşturma - pipe operator kullanmadan
         try:
-            llm_result = chain.invoke({})
+            # Zincir fonksiyonu oluştur
+            def execute_chain():
+                try:
+                    # Birinci yöntem: Prompt'u önceden formatla
+                    print("Birinci zincir yöntemi deneniyor...")
+                    formatted_prompt = query_prompt.format(**input_values)
+                    response = model.invoke(formatted_prompt)
+                    return StrOutputParser().parse(response)
+                    
+                except Exception as e1:
+                    print(f"Birinci zincir yöntemi başarısız: {e1}")
+                    
+                    try:
+                        # İkinci yöntem: Daha açık yaklaşım
+                        print("İkinci zincir yöntemi deneniyor...")
+                        prompt_text = query_prompt.format(
+                            system_instruction=system_instruction,
+                            question=question,
+                            context=context
+                        )
+                        response = model.invoke(prompt_text)
+                        return StrOutputParser().parse(response)
+                        
+                    except Exception as e2:
+                        print(f"İkinci zincir yöntemi başarısız: {e2}")
+                        
+                        # Son çare yöntemi
+                        print("Son çare yöntemi deneniyor...")
+                        direct_prompt = f"Sistem: {system_instruction}\n\nSoru: {question}\n\nBağlam: {context[:5000]}\n\nYanıt:"
+                        response = model.invoke(direct_prompt)
+                        return str(response)
+            
+            # Zincir fonksiyonunu tanımla
+            def chain():
+                return execute_chain()
+            
+        except Exception as outer_e:
+            print(f"Zincir oluşturma tamamen başarısız: {outer_e}")
+            raise outer_e
+        
+        # LLM yanıtını al
+        llm_start = time.time()
+        print("LLM yanıtı alınıyor...")
+        
+        try:
+            # Zaman aşımı ekleyerek LLM yanıtını al
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError
+              # LLM yanıt fonksiyonu - güvenlik kontrolleri ve hata yönetimi güçlendirildi
+            def get_llm_response():
+                try:
+                    # Zinciri çağır - artık parametresiz
+                    response = chain()
+                    
+                    # Boş yanıt kontrolü - geliştirilmiş kontrol yapısı
+                    if response is None or len(str(response).strip()) == 0:
+                        raise ValueError("LLM boş yanıt döndürdü")
+                    
+                    return response
+                    
+                except ValueError as ve:
+                    # Zaten hata değerlendirilmiş, detaylı loglama ile
+                    print(f"LLM değer hatası: {str(ve)}")
+                    # ValueError durumunda yeniden denemeden önce bekleme ekle
+                    time.sleep(0.5)
+                    # Fallback mekanizmasını başlat
+                    raise ve
+                    
+                except Exception as inner_e:
+                    error_str = str(inner_e)
+                    print(f"LLM çağrısında hata: {error_str}")
+                    
+                    # Çeşitli hata türlerine özel çözümler
+                    if "Cell is empty" in error_str or "NoneType" in error_str or "empty" in error_str:
+                        print("İçerik temelli hata tespit edildi, alternatif yaklaşımlar deneniyor...")
+                        
+                        # Birinci düzeltme - Doğrudan prompt yöntemi
+                        try:
+                            print("1. alternatif: Doğrudan prompt yöntemi")
+                            direct_prompt = f"""Sistem: {system_instruction}
+                            
+                            Soru: {question}
+                            
+                            İlgili bilgi parçaları:
+                            {context[:4000]}
+                            
+                            Yukarıdaki bilgilere dayanarak soruyu yanıtla:"""
+                            
+                            direct_response = model.invoke(direct_prompt)
+                            if direct_response and len(str(direct_response).strip()) > 20:
+                                print("Doğrudan prompt yöntemi başarılı")
+                                return direct_response
+                        except Exception as alt1_e:
+                            print(f"1. alternatif başarısız: {str(alt1_e)}")
+                        
+                        # İkinci düzeltme - Daha basit prompt ve daha az bağlam
+                        try:
+                            print("2. alternatif: Basitleştirilmiş model çağrısı")
+                            simple_input = f"Lütfen şu soruyu cevapla: {question}\n\nKullanılabilecek bilgiler:\n{context[:2000]}"
+                            direct_response = model.invoke(simple_input)
+                            if direct_response and len(str(direct_response).strip()) > 20:
+                                print("Basitleştirilmiş model çağrısı başarılı")
+                                return direct_response
+                        except Exception as alt2_e:
+                            print(f"2. alternatif başarısız: {str(alt2_e)}")
+                        
+                        # Üçüncü düzeltme - Minimum parametreli model
+                        try:
+                            print("3. alternatif: Acil durum modeli")
+                            emergency_model = OllamaLLM(
+                                model="llama3.1", 
+                                temperature=0.2,
+                                top_p=0.8,
+                                num_predict=512
+                            )
+                            minimal_prompt = f"SORU: {question}\nBİLGİLER: {context[:1000]}\nYANIT:"
+                            emergency_response = emergency_model.invoke(minimal_prompt)
+                            if emergency_response:
+                                print("Acil durum modeli başarılı")
+                                return emergency_response
+                        except Exception as alt3_e:
+                            print(f"3. alternatif başarısız: {str(alt3_e)}")
+                    
+                    # Tüm alternatifler başarısız olduğunda hatayı yükselt
+                    print("Tüm LLM yanıt alternatifleri başarısız oldu")
+                    raise inner_e
+              # Paralel işleme ile zaman aşımı kontrolü
+            with ThreadPoolExecutor() as executor:
+                future = executor.submit(get_llm_response)
+                try:
+                    # Gelişmiş zaman aşımı kontrolü - progressif bekletme
+                    try:
+                        # İlk 30 saniye içinde yanıt gelirse hemen döndür
+                        llm_result = future.result(timeout=30)
+                    except TimeoutError:
+                        # 30 saniye içinde yanıt gelmezse kullanıcıya bilgi ver ve biraz daha bekle
+                        print("İlk 30 saniyelik yanıt süresi aşıldı, 30 saniye daha bekleniyor...")
+                        
+                        # Ana sistemi yavaşlatmamak için zaman aşımı sonrası kullanıcıya geri bildirim vermeye devam et
+                        try:
+                            llm_result = future.result(timeout=30)  # 30 saniye daha bekle
+                        except TimeoutError:
+                            print("Toplam 60 saniyelik zaman aşımı - LLM yanıtı alınamadı")
+                            raise TimeoutError("LLM yanıtı için maksimum süre (60 saniye) aşıldı.")
+                    
+                    # Yanıt kontrolü - geliştirilmiş güvenlik kontrolleri
+                    if llm_result is None:
+                        raise ValueError("LLM yanıtı None olarak döndü")
+                    
+                    # Boş ya da çok kısa yanıtlar için kontrol
+                    llm_result_str = str(llm_result).strip()
+                    if len(llm_result_str) < 10:
+                        raise ValueError(f"LLM geçersiz yanıt döndürdü (çok kısa yanıt: '{llm_result_str}')")
+                        
+                    stage_times["llm_yaniti"] = time.time() - llm_start
+                except TimeoutError:
+                    print("LLM yanıtı zaman aşımına uğradı.")
+                    raise Exception("Yanıt zaman aşımına uğradı. Lütfen tekrar deneyin veya hızlı yanıt modunu kullanın. Bu genellikle sistem yoğun olduğunda meydana gelir.")
         except Exception as e:
             print(f"LLM yanıtı alınırken hata: {e}")
-            # Doğrudan dokümanlardan basit bir yanıt oluştur
-            simple_result = f"Yanıt oluşturulurken bir sorun oluştu, ancak şu dokümanları buldum:\n\n"
-            for i, doc in enumerate(docs[:5], 1):
-                simple_result += f"Doküman {i}:\n{doc.page_content}\n\n"
-            return simple_result
-        
-        # Kullanılan kaynakları ekle
-        result = f"=== CEVAP ===\n\n{llm_result}\n\n{format_sources(docs[:10])}"
-        
-        # Konuşma geçmişine ekle
-        conversation_history.append({
-            "question": question,
-            "result_summary": llm_result[:100] + "..." if len(llm_result) > 100 else llm_result,
-            "timestamp": datetime.now().isoformat(),
-            "keywords": keywords
-        })
-        
-        # Son 20 konuşmayı tut
-        if len(conversation_history) > 20:
-            conversation_history.pop(0)
+            import traceback
+            print("=== HATA DETAYLARI ===")
+            traceback.print_exc()
+            print("=====================")
             
-        # Önbelleğe ekle
-        query_cache[cache_key] = result
-        memory_cache[cache_key] = {
-            'result': result, 
-            'timestamp': time.time(), 
-            'hits': 1,
-            'keywords': keywords
-        }
+            # Doğrudan dokümanlardan daha gelişmiş bir yanıt oluştur
+            simple_result = f"Yanıt oluşturulurken bir sorun oluştu ({str(e)}), ancak şu ilgili bilgileri buldum:\n\n"
+            
+            # Hata durumunda daha bilgilendirici ve yapılandırılmış yanıt
+            simple_result += "### İlgili Bilgi Parçaları\n\n"
+            
+            for i, doc in enumerate(docs[:7], 1):  # İlk 7 en alakalı belgeyi göster
+                source = doc.metadata.get('source', 'Bilinmiyor')
+                if len(source) > 40:  # Uzun dosya adlarını kısalt
+                    source = source[:37] + "..."
+                
+                # Zaman bilgisini doğru şekilde al
+                time_info = doc.metadata.get('time', '')
+                if not time_info or time_info == "00:00:00 - 00:00:00":
+                    start_time = doc.metadata.get('start_time', '')
+                    end_time = doc.metadata.get('end_time', '')
+                    if start_time and end_time:
+                        time_info = f"{start_time} - {end_time}"
+                    else:
+                        content = doc.page_content
+                        time_match = re.search(r"Time:\s*(\d+:\d+:\d+\s*-\s*\d+:\d+:\d+)", content)
+                        if time_match:
+                            time_info = time_match.group(1)
+                        else:
+                            time_info = "Zaman bilgisi yok"
+                
+                speaker = doc.metadata.get('speaker', 'Bilinmiyor')
+                if speaker == "Bilinmiyor":
+                    content = doc.page_content
+                    speaker_match = re.search(r"Speaker:\s*([A-Za-z0-9]+)", content)
+                    if speaker_match:
+                        speaker = speaker_match.group(1)
+                  # İçeriği kısalt - güvenli bir şekilde
+                try:
+                    content = doc.page_content.split('Content: ')[-1] if 'Content: ' in doc.page_content else doc.page_content
+                    content = content.strip() if content else ""
+                    if len(content) > 500:
+                        content = content[:497] + "..."
+                except Exception as content_e:
+                    print(f"İçerik işlenirken hata: {content_e}")
+                    content = str(doc.page_content)[:500] if hasattr(doc, 'page_content') else "İçerik alınamadı"
+                
+                simple_result += f"**Bilgi {i}**\n\n📄 **Dosya:** {source}\n⏱️ **Zaman:** {time_info}\n👤 **Konuşmacı:** {speaker}\n\n{content}\n\n---\n\n"
+            simple_result += "\nSorununuzla ilgili daha fazla bilgi için lütfen tekrar deneyin veya hızlı yanıt modunu kullanın."
+              # Hata durumunda daha basit bir prompt ile tekrar deneyelim
+            # Son çare yaklaşımı - tüm önceki yaklaşımlar başarısız olduğunda
+            try:
+                print("Basit fallback mekanizması ile tekrar deneniyor...")
+                
+                # "Cell is empty" hatası için daha dirençli bir yaklaşım
+                # 1. Doğrudan değişken geçişi - lambda kullanmadan
+                # 2. Daha basit prompt yapısı
+                # 3. Daha az belge ile deneme
+                
+                # Basit bir prompt şablonu
+                simple_prompt = """Aşağıdaki doküman parçalarını kullanarak bu soruya yanıt ver: 
+                
+                SORU: {soru}
+                
+                DOKÜMANLAR:
+                {belgeler}
+                
+                ÖZET YANIT:"""
+                
+                # Değişkenleri doğrudan hazırla
+                fallback_context = "\n\n".join([doc.page_content for doc in docs[:3]])  # Daha az belge
+                
+                # Prompt'u oluştur
+                fallback_prompt = ChatPromptTemplate.from_template(simple_prompt)
+                
+                # Değişkenleri doğrudan dictionary olarak geçir - lambda kullanmadan
+                input_map = {"soru": question, "belgeler": fallback_context}
+                
+                # Doğrudan modele gönder
+                try:
+                    # İlk fallback yöntemi
+                    formatted_prompt = fallback_prompt.format(**input_map)
+                    fallback_result = model.invoke(formatted_prompt)
+                except Exception as e1:
+                    print(f"İlk fallback yöntemi başarısız: {e1}")
+                    try:
+                        # İkinci fallback yöntemi - çok daha basit bir yaklaşım
+                        direct_prompt = f"Soru: {question}\n\nBelgeler: {fallback_context[:1000]}\n\nLütfen bu soruya belgelerden alınan bilgilere dayanarak özet bir yanıt ver:"
+                        fallback_result = model.invoke(direct_prompt)
+                    except Exception as e2:
+                        print(f"İkinci fallback yöntemi de başarısız: {e2}")                        # Belgeleri doğrudan göster
+                        return simple_result
+                
+                if fallback_result and len(str(fallback_result).strip()) > 20:
+                    return f"{fallback_result}\n\n[Not: Bu yanıt basitleştirilmiş bir yaklaşımla oluşturulmuştur. Detaylar için lütfen tekrar deneyin.]"
+                else:
+                    print("Fallback yanıtı çok kısa veya boş")
+                    return simple_result
+                    
+            except Exception as fallback_e:
+                print(f"Fallback mekanizması başarısız: {fallback_e}")
+                print("=== FALLBACK HATA DETAYLARI ===")
+                traceback.print_exc()
+                print("================================")
+                      # BASAMAKLI KURTARMA SİSTEMİ - son çare yaklaşımları
+            # Safha 1: Daha sağlam doküman işleme ile acil durum modeli
+            try:
+                print("Son çare yaklaşımı 1: Güvenli doküman işleme ile acil durum modeli...")
+                
+                # Güvenli bir şekilde doküman içeriklerini al
+                content_samples = []
+                for i, doc in enumerate(docs[:5]):
+                    try:
+                        if hasattr(doc, 'page_content') and doc.page_content:
+                            content = doc.page_content[:150] + "..."
+                        else:
+                            content = f"Belge {i+1} içeriği okunamadı"
+                        content_samples.append(f"Belge {i+1}: {content}")
+                    except Exception as doc_e:
+                        print(f"Belge {i+1} işlenirken hata: {doc_e}")
+                        content_samples.append(f"Belge {i+1}: İçerik işlenemedi")
+                
+                content_text = "\n\n".join(content_samples)
+                
+                # Basit ve sağlam prompt ile acil durum modeli
+                emergency_prompt = f"""SORU: {question}
+                
+                BAZI İLGİLİ BİLGİLER:
+                {content_text}
+                
+                Lütfen yukarıdaki bilgilere dayanarak soruya kısa ve öz bir yanıt ver:"""
+                
+                # Düşük parametre değerleriyle çağırarak başarı şansını artır
+                emergency_model = OllamaLLM(
+                    model="llama3.1", 
+                    temperature=0.3,
+                    top_p=0.8,
+                    top_k=30,
+                    num_predict=1024,
+                    repeat_penalty=1.2
+                )
+                
+                emergency_result = emergency_model.invoke(emergency_prompt)
+                if emergency_result and len(emergency_result.strip()) > 20:
+                    print("Son çare yaklaşımı 1 başarılı")
+                    return f"{emergency_result}\n\n[Not: Bu yanıt acil durum mekanizması ile oluşturulmuştur. Tam kapsamlı yanıt için lütfen tekrar deneyin.]"
+            except Exception as last_e:
+                print(f"Son çare yaklaşımı 1 başarısız: {str(last_e)}")
+            
+            # Safha 2: Doküman içeriklerini tamamen atlayarak yalnızca soruya odaklanma
+            try:
+                print("Son çare yaklaşımı 2: Minimum parametre ve doğrudan soru...")
+                
+                # En düşük parametre ve en basit prompt
+                minimal_model = OllamaLLM(
+                    model="llama3.1", 
+                    temperature=0.2,
+                    num_predict=512
+                )
+                
+                minimal_prompt = f"Şu soruyu yanıtla: {question}"
+                minimal_result = minimal_model.invoke(minimal_prompt)
+                
+                if minimal_result and len(minimal_result.strip()) > 20:
+                    print("Son çare yaklaşımı 2 başarılı")
+                    return f"{minimal_result}\n\n[Not: Bu yanıt doğrudan soru yanıtlama mekanizması ile oluşturulmuştur. Belgelere dayalı yanıt için lütfen tekrar deneyin.]"
+            except Exception as last2_e:
+                print(f"Son çare yaklaşımı 2 başarısız: {str(last2_e)}")
+                
+            # Safha 3: Raw string ve basit bir talimat ile deneme
+            try:
+                print("Son çare yaklaşımı 3: Bağlam dışı raw string yanıtı...")
+                
+                # Tamamen ham bir yaklaşım
+                try:
+                    result = subprocess.run(
+                        ["ollama", "run", "llama3.1", f"'{question}' sorusunu yanıtla"],
+                        capture_output=True, 
+                        text=True, 
+                        timeout=15
+                    )
+                    if result.stdout and len(result.stdout) > 20:
+                        print("Son çare yaklaşımı 3 başarılı")
+                        return f"{result.stdout}\n\n[Not: Bu yanıt acil durum komut satırı mekanizması ile oluşturulmuştur.]"
+                except Exception as cmd_e:
+                    print(f"Komut satırı denemesi başarısız: {cmd_e}")
+            except Exception as last3_e:
+                print(f"Son çare yaklaşımı 3 başarısız: {str(last3_e)}")
+            
+            # Tüm yaklaşımlar başarısız olduğunda basit bir mesaj döndür
+            return simple_result + "\n\nSistem şu anda yanıt üretmekte zorlanıyor. Lütfen sorunuzu daha açık bir şekilde yeniden sormayı deneyin."
+        
+        # Yanıt sonlandırma ve formatlamayı iyileştir
+        formatting_start = time.time()
+        
+        # Kullanılan kaynakları ekle - geliştirilmiş formatla
+        result = f"{llm_result}\n\n{format_sources(docs[:15])}"
         
         # Periyodik olarak bellek önbelleğini temizle
         if len(memory_cache) % 10 == 0:
             clear_memory_cache()
-            
+        
         # Belirli aralıklarla önbelleği diske kaydet
         if len(query_cache) % 5 == 0:
             save_cache()
         
+        stage_times["sonlandirma"] = time.time() - formatting_start
+        
         # İstatistikler
         end_time = time.time()
         process_time = end_time - start_time
-        print(f"Sorgu işlendi. İşlem süresi: {process_time:.2f} saniye")
         
-        # Analiz sonucunu otomatik olarak kaydet
-        if process_time > 1.0:  # Sadece belli bir sürenin üzerindeki yanıtları kaydet
-            try:
-                save_analysis(question, result)
-            except Exception as e:
-                print(f"Analiz kaydedilirken hata: {e}")
+        # Sorgu performans analizini göster
+        print(f"Sorgu işlendi. Toplam süre: {process_time:.2f} saniye")
+        print("İŞLEM SÜRELERİ:")
+        for stage, duration in stage_times.items():
+            print(f" - {stage}: {duration:.2f} saniye")
             
+        # Sonuç içeriği analizi
+        result_length = len(result)
+        source_count = result.count("📄")
+        print(f"Yanıt uzunluğu: {result_length} karakter, {source_count} kaynak kullanıldı")
+        
         return result
         
     except Exception as e:
@@ -538,14 +1043,13 @@ def query_transcripts(question):
 def quick_query(question):
     """Hızlı yanıt modu - daha az doküman ile hızlı yanıt"""
     print("Hızlı yanıt modu aktif...")
-    
     # Mevcut ayarları sakla
     original_k = retriever.search_kwargs.get("k", 12)
     original_fetch_k = retriever.search_kwargs.get("fetch_k", 40)
     
-    # Daha az dokümanla hızlı sorgu için ayarları değiştir
-    retriever.search_kwargs["k"] = 5
-    retriever.search_kwargs["fetch_k"] = 15
+    # Yine yeterli sayıda dokümanla hızlı sorgu için ayarları değiştir
+    retriever.search_kwargs["k"] = 25
+    retriever.search_kwargs["fetch_k"] = 50
     
     # Hızlı sorgu yap
     try:
@@ -581,38 +1085,25 @@ def show_help():
     print("\n=== YARDIM ===")
     print("Kullanılabilir komutlar:")
     print("- 'yardım' veya 'help': Bu ekranı gösterir.")
-    print("- 'geçmiş' veya 'history': Konuşma geçmişini gösterir.")
     print("- 'temizle' veya 'clear': Önbelleği temizler.")
     print("- 'dosyalar' veya 'files': Transcript dosyalarını listeler.")
     print("- 'oku [dosya_adı] [tümü]': Transcript dosyasını görüntüler. 'tümü' parametresi tüm içeriği gösterir.")
     print("- 'analiz [metin]': Girilen metni özetler ve analiz eder.")
     print("- 'stat' veya 'stats': İstatistikleri gösterir.")
     print("- 'bellek' veya 'memory': Bellek önbelleğini temizler.")
+    print("- 'vektör-yenile': Vektör veritabanını yeniden oluşturur (dinamik chunking ile).")
     print("- 'q' veya 'çıkış': Programdan çıkar.")
     print("\nSorgu İpuçları:")
     print("- Sorunun başına '!' ekleyerek hızlı yanıt alabilirsiniz.")
     print("- Spesifik sorular daha doğru yanıtlar almanızı sağlar.")
     print("- Zamanla ilgili sorularda zaman aralığı belirtmek faydalıdır.")
-    print("- Konuşmacıların isimlerini veya kimliklerini (A, B, vs.) belirtebilirsiniz.")
-    print("\nYeni Özellikler (v3.1):")
-    print("- Transkript dosyalarını doğrudan okuma ve önizleme")
-    print("- Harici metin analizi")
-    print("- Geliştirilmiş Türkçe anahtar kelime çıkarma")
-    print("- TurkishStemmer entegrasyonu ile daha iyi sonuçlar")
-    print("- Daha akıllı belge alaka puanı hesaplama")
-    print("- Daha yüksek model performansı ve bağlam penceresi")
-    print("-------------------------------")
-
-# Konuşma geçmişini göster
-def show_history():
-    if not conversation_history:
-        print("\nHenüz konuşma geçmişi yok.")
-        return
-    
-    print("\n=== KONUŞMA GEÇMİŞİ ===")
-    for i, entry in enumerate(conversation_history, 1):
-        timestamp = datetime.fromisoformat(entry["timestamp"]).strftime("%H:%M:%S")
-        print(f"{i}. [{timestamp}] Soru: {entry['question'][:50]}{'...' if len(entry['question']) > 50 else ''}")
+    print("- Konuşmacıların isimlerini veya kimliklerini (Speaker A, Speaker B, vs.) belirtebilirsiniz.")
+    print("\nSistem Özellikleri:")
+    print("- Transkript Analizi: Sistem yalnızca transkriptlerdeki bilgilere dayanarak yanıt verir.")
+    print("- Akademik Yanıtlar: Yanıtlar ansiklopedik bir dille, alıntı yapmadan sentezlenir.")
+    print("- Kaynak Gösterimi: Her yanıt sonunda dosya adı ve zaman aralığı belirtilir.")
+    print("- Konuşmacı Bilgisi: Farklı konuşmacıların (Speaker A, B, vs.) perspektifleri belirtilir.")
+    print("- Dinamik Chunking: Metin içeriğine göre otomatik ayarlanan chunk boyutları.")
     print("-------------------------------")
 
 # Transcript dosyalarını listele
@@ -649,9 +1140,6 @@ def show_stats():
     # Önbellek istatistikleri
     print(f"Disk Önbellek Boyutu: {len(query_cache)} sorgu")
     print(f"Bellek Önbellek Boyutu: {len(memory_cache)} sorgu")
-    
-    # Konuşma geçmişi
-    print(f"Konuşma Geçmişi: {len(conversation_history)} soru")
     
     # Transcript dosyaları
     transcript_dir = "transcripts"
@@ -754,8 +1242,29 @@ def view_transcript(filename=None, show_all=False):
 
 def main():
     print("\n=== Türkçe Konuşma Analiz Sistemi ===")
-    print("Transcript Analiz Asistanı v3.1")
-    print("Vektör veritabanı otomatik olarak yüklendi.")
+    print("Transcript Analiz Asistanı v3.2")
+    
+    # Vektör veritabanı durumunu kontrol et
+    if VECTOR_DB_AVAILABLE:
+        print("Vektör veritabanı başarıyla yüklendi.")
+    else:
+        print("UYARI: Vektör veritabanı yüklenemedi!")
+        print("Sorgu işlevi kullanılamayacak. Lütfen aşağıdaki adımları izleyin:")
+        print("1. Terminal'de 'ollama list' komutu ile mevcut modelleri kontrol edin")
+        print("2. vector.py dosyasında kullanılan embedding modelini mevcut bir modelle değiştirin")
+        print("3. Programı yeniden başlatın")
+        
+        # Mevcut modelleri kontrol et ve göster
+        try:
+            result = subprocess.run(['ollama', 'list'], capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout:
+                print("\nMevcut modeller:")
+                for line in result.stdout.split('\n')[:10]:  # İlk 10 satırı göster
+                    if line.strip():
+                        print(f"  {line}")
+        except Exception:
+            pass
+            
     print("Sorularınızı sorabilirsiniz.")
     print("Yardım için 'yardım' yazın. Çıkmak için 'q' yazın.")
     print("Hızlı yanıt için soru başına '!' ekleyin.")
@@ -772,10 +1281,6 @@ def main():
             
             if question.lower() == 'yardım' or question.lower() == 'help':
                 show_help()
-                continue
-                
-            if question.lower() == 'geçmiş' or question.lower() == 'history':
-                show_history()
                 continue
                 
             if question.lower() == 'temizle' or question.lower() == 'clear':
@@ -795,6 +1300,17 @@ def main():
                 
             if question.lower() == 'stat' or question.lower() == 'stats':
                 show_stats()
+                continue
+                
+            if question.lower() == 'vektör-yenile' or question.lower() == 'vektor-yenile':
+                print("Vektör veritabanı yeniden oluşturuluyor (dinamik chunking ile)...")
+                try:
+                    # Vector modülünden create_vectorstore fonksiyonunu çağır
+                    from vector import create_vectorstore
+                    create_vectorstore(force_recreate=True, dynamic_chunking=True)
+                    print("Vektör veritabanı başarıyla yenilendi. Programı yeniden başlatın.")
+                except Exception as e:
+                    print(f"Vektör veritabanı yenilenirken hata oluştu: {e}")
                 continue
             
             # Transkript okuma komutları
@@ -844,6 +1360,12 @@ def main():
             
             if not question.strip():
                 continue
+                
+            # Vektör veritabanı kullanılabilir mi kontrol et
+            if not VECTOR_DB_AVAILABLE:
+                print("HATA: Vektör veritabanı yüklenemediği için sorgu işlevi kullanılamıyor.")
+                print("Lütfen vector.py dosyasını düzenleyerek uygun bir embedding modeli seçin ve programı yeniden başlatın.")
+                continue
             
             # Hızlı yanıt isteniyor mu?
             quick = False
@@ -869,5 +1391,67 @@ def main():
         save_cache()
         print("Çıkış yapılıyor...")
 
+# Belgeleri kronolojik olarak sıralama fonksiyonu
+def sort_documents_chronologically(docs):
+    """Belgeleri zaman bilgisine göre kronolojik olarak sıralar"""
+    import re
+    
+    def extract_time_info(doc):
+        # Dokümanın zamanını çıkar
+        time_info = doc.metadata.get("time", "")
+        
+        # Eğer time bilgisi yoksa veya varsayılan değerse, start_time ve end_time'ı kontrol et
+        if not time_info or time_info == "Bilinmiyor" or time_info == "00:00:00 - 00:00:00":
+            start_time = doc.metadata.get("start_time", "")
+            end_time = doc.metadata.get("end_time", "")
+            if start_time and end_time:
+                time_info = f"{start_time} - {end_time}"
+            
+        # İçerikten zaman bilgisi çıkarmayı dene
+        if not time_info or time_info == "Bilinmiyor":
+            content = doc.page_content
+            time_match = re.search(r"Time:\s*(\d+:\d+:\d+)", content)
+            if time_match:
+                time_info = time_match.group(1)
+        
+        # Zaman formatını analiz et
+        time_parts = re.findall(r'(\d+):(\d+):(\d+)', time_info)
+        if time_parts:
+            # İlk zaman değerini al (başlangıç zamanı)
+            h, m, s = map(int, time_parts[0])
+            # Zamanı saniyeye çevir
+            return h * 3600 + m * 60 + s
+        
+        # Zaman bilgisi yoksa veya analiz edilemiyorsa sona koy
+        return float('inf')
+    
+    # Zamanlarına göre belgeleri sırala
+    return sorted(docs, key=extract_time_info)
+
+# Ana programı çalıştır
 if __name__ == "__main__":
+    # Gerekli tüm modüllerin import edildiğinden emin ol
+    import os
+    import re
+    import json
+    import time
+    import traceback
+    import subprocess
+    import numpy as np
+    
+    try:
+        import psutil
+    except ImportError:
+        print("psutil modülü bulunamadı. Sistem istatistikleri gösterilmeyecek.")
+    
+    try:
+        import concurrent.futures
+    except ImportError:
+        print("concurrent.futures modülü bulunamadı. Paralel işleme kullanılamayacak.")
+    
+    # Vektör veritabanı kullanılabilir mi kontrol et ve varlığını göster
+    if VECTOR_DB_AVAILABLE:
+        print(f"Vektör veritabanı başarıyla yüklendi. {len(retriever.vectorstore.get())} doküman parçası mevcut.")
+
+    # Ana fonksiyonu çağır
     main()
