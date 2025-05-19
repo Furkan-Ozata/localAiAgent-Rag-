@@ -2,6 +2,7 @@ from langchain_ollama import OllamaLLM
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from utils.streaming import stream_llm_response, create_academic_formatted_stream
 import os
 import time
 import json
@@ -13,6 +14,36 @@ import re
 import subprocess
 import numpy as np
 import traceback
+
+# ========== SABITLER ==========
+# Maksimum döküman sayısı ve filtreleme limitleri
+MAX_DOCUMENTS = 70  # İşlenecek maksimum döküman sayısı
+MAX_DOCS_PER_SPEAKER = 15  # Konuşmacı başına maksimum döküman sayısı
+OTHER_DOCS_LIMIT = 35  # Konuşmacıya özel olmayan maksimum döküman sayısı
+
+# İçerik sınırlamaları
+CONTENT_MAX_LENGTH = 1000  # Belge içeriği maksimum karakter sayısı
+CONTEXT_TRUNCATION = 4000  # Bağlam kesme limiti
+FALLBACK_CONTEXT_LIMIT = 2000  # Yedek yöntem maksimum bağlam limiti
+EMERGENCY_CONTEXT_LIMIT = 1000  # Acil durum maksimum bağlam limiti
+FILENAME_MAX_LENGTH = 40  # Dosya adı maksimum karakter sayısı
+MIN_RESPONSE_LENGTH = 20  # Minimum LLM yanıt uzunluğu
+
+# Zaman aşımı değerleri
+PRIMARY_TIMEOUT = 30  # İlk LLM yanıt zaman aşımı (saniye)
+SECONDARY_TIMEOUT = 30  # İkincil LLM yanıt zaman aşımı (saniye)
+EMERGENCY_TIMEOUT = 15  # Acil durum LLM yanıt zaman aşımı (saniye)
+
+# Önbellek parametreleri
+CACHE_CLEAN_THRESHOLD = 100  # Bellek önbelleği temizleme eşiği
+CACHE_KEEP_COUNT = 50  # Bellek önbelleğinde tutulacak öğe sayısı
+DISK_CACHE_SAVE_INTERVAL = 5  # Önbelleğin diske kaydedilme sıklığı
+
+# Kronolojik analiz anahtar kelimeleri
+CHRONO_KEYWORDS = ["kronoloji", "zaman", "sıra", "gelişme", "tarihsel", "süreç"]
+
+# Karşılaştırma analizi anahtar kelimeleri
+COMPARISON_KEYWORDS = ["karşılaştır", "fark", "benzerlik", "benzer", "farklı"]
 
 # TurkishStemmer için güvenli import
 try:
@@ -387,10 +418,10 @@ def clear_memory_cache():
     global memory_cache
     
     # 100'den fazla öğe varsa eskilerini temizle 
-    if len(memory_cache) > 100:
+    if len(memory_cache) > CACHE_CLEAN_THRESHOLD:
         # En son kullanılanları sakla (50 öğe)
         sorted_keys = sorted(memory_cache.keys(), key=lambda k: memory_cache[k].get('timestamp', 0), reverse=True)
-        keys_to_keep = sorted_keys[:50]
+        keys_to_keep = sorted_keys[:CACHE_KEEP_COUNT]
         
         new_cache = {}
         for key in keys_to_keep:
@@ -400,8 +431,13 @@ def clear_memory_cache():
         print(f"Bellek önbelleği temizlendi. Kalan öğe sayısı: {len(memory_cache)}")
 
 # Ana sorgulama fonksiyonu - Paralel çalışma ve önbellek iyileştirmeleri
-def query_transcripts(question):
-    """Ana sorgulama fonksiyonu - Performans optimizasyonlu"""
+def query_transcripts(question, stream_callback=None):
+    """Ana sorgulama fonksiyonu - Performans optimizasyonlu
+    
+    Args:
+        question: Kullanıcı sorusu
+        stream_callback: Yanıtı parça parça işlemek için callback fonksiyonu
+    """
     global system_instruction  # Global sistem talimatını kullan
     print(f"Sorgu işleniyor: \"{question}\"")
     start_time = time.time()
@@ -521,12 +557,12 @@ def query_transcripts(question):
         
         # Filtreleme ve çeşitleme stratejileri uygula
         # İlk 70 dokümanı al (en alakalı olanları)
-        filtered_docs = docs[:70]
+        filtered_docs = docs[:MAX_DOCUMENTS]
         
         # Sorgu tipini algılama - özel işleme stratejileri
-        is_chronological = any(word in question.lower() for word in ["kronoloji", "zaman", "sıra", "gelişme", "tarihsel", "süreç"])
+        is_chronological = any(word in question.lower() for word in CHRONO_KEYWORDS)
         is_speaker_specific = "speaker" in question.lower() or "konuşmacı" in question.lower()
-        is_comparison = any(word in question.lower() for word in ["karşılaştır", "fark", "benzerlik", "benzer", "farklı"])
+        is_comparison = any(word in question.lower() for word in COMPARISON_KEYWORDS)
         
         # Kronolojik analiz için belgeleri zaman sırasına diz
         if is_chronological:
@@ -545,7 +581,7 @@ def query_transcripts(question):
                 # İlgili konuşmacıların belgelerini başa al
                 speaker_docs = [doc for doc in filtered_docs if doc.metadata.get("speaker", "").upper() in speaker_matches]
                 other_docs = [doc for doc in filtered_docs if doc.metadata.get("speaker", "").upper() not in speaker_matches]
-                filtered_docs = speaker_docs + other_docs[:max(35, 70-len(speaker_docs))]
+                filtered_docs = speaker_docs + other_docs[:max(OTHER_DOCS_LIMIT, MAX_DOCUMENTS-len(speaker_docs))]
         
         # Karşılaştırma analizi için belge çeşitliliğini artır
         if is_comparison:
@@ -560,7 +596,7 @@ def query_transcripts(question):
             
             # Her konuşmacıdan dengeli sayıda belge seç
             balanced_docs = []
-            max_per_speaker = 15  # Her konuşmacıdan maksimum belge sayısı
+            max_per_speaker = MAX_DOCS_PER_SPEAKER  # Her konuşmacıdan maksimum belge sayısı
             
             # En alakalı konuşmacıları sırala (belge sayısına göre)
             sorted_speakers = sorted(speaker_groups.keys(), key=lambda s: len(speaker_groups[s]), reverse=True)
@@ -570,7 +606,7 @@ def query_transcripts(question):
                 balanced_docs.extend(speaker_groups[speaker][:max_per_speaker])
             
             # Maksimum belge sayısına kadar doldur
-            filtered_docs = balanced_docs[:70]
+            filtered_docs = balanced_docs[:MAX_DOCUMENTS]
             
         stage_times["filtreleme"] = time.time() - filtering_start
             
@@ -586,8 +622,8 @@ def query_transcripts(question):
         for i, doc in enumerate(filtered_docs, 1):
             # Dosya adını kısalt
             source = doc.metadata.get('source', 'Bilinmiyor')
-            if len(source) > 40:  # Uzun dosya adlarını kısalt
-                source = source[:37] + "..."
+            if len(source) > FILENAME_MAX_LENGTH:  # Uzun dosya adlarını kısalt
+                source = source[:FILENAME_MAX_LENGTH-3] + "..."
             
             # Zaman bilgisini doğru şekilde biçimlendir
             time_info = doc.metadata.get('time', '')
@@ -608,8 +644,8 @@ def query_transcripts(question):
                     content = content.strip()
                 
                 # İçeriği belirli bir uzunluğa kısalt (çok uzun belgeleri kırp)
-                if len(content) > 1000:
-                    content = content[:997] + "..."
+                if len(content) > CONTENT_MAX_LENGTH:
+                    content = content[:CONTENT_MAX_LENGTH-3] + "..."
             except Exception as content_e:
                 print(f"İçerik işlenirken hata: {content_e}")
                 # Hata durumunda varsayılan bir değer belirle
@@ -651,11 +687,27 @@ def query_transcripts(question):
             # Zincir fonksiyonu oluştur
             def execute_chain():
                 try:
-                    # Birinci yöntem: Prompt'u önceden formatla
-                    print("Birinci zincir yöntemi deneniyor...")
-                    formatted_prompt = query_prompt.format(**input_values)
-                    response = model.invoke(formatted_prompt)
-                    return StrOutputParser().parse(response)
+                    # Streaming desteği ile akademik formatı kullan
+                    print("Akademik formatlı streaming yanıt oluşturuluyor...")
+                    if stream_callback:
+                        # Stream modunda çalış
+                        formatted_prompt = query_prompt.format(**input_values)
+                        create_academic_formatted_stream(
+                            model=model,
+                            prompt=formatted_prompt,
+                            system_instruction=query_system_instruction,
+                            question=question,
+                            context=context,
+                            callback=stream_callback
+                        )
+                        # Stream callback kullanıldığında None döndür
+                        return None
+                    else:
+                        # Normal modda prompt'u önceden formatla
+                        print("Birinci zincir yöntemi deneniyor...")
+                        formatted_prompt = query_prompt.format(**input_values)
+                        response = model.invoke(formatted_prompt)
+                        return StrOutputParser().parse(response)
                     
                 except Exception as e1:
                     print(f"Birinci zincir yöntemi başarısız: {e1}")
@@ -694,8 +746,7 @@ def query_transcripts(question):
         
         try:
             # Zaman aşımı ekleyerek LLM yanıtını al
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError
-              # LLM yanıt fonksiyonu - güvenlik kontrolleri ve hata yönetimi güçlendirildi
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError            # LLM yanıt fonksiyonu - güvenlik kontrolleri ve hata yönetimi güçlendirildi
             def get_llm_response():
                 try:
                     # Zinciri çağır - artık parametresiz
@@ -736,7 +787,7 @@ def query_transcripts(question):
                             Yukarıdaki bilgilere dayanarak soruyu yanıtla:"""
                             
                             direct_response = model.invoke(direct_prompt)
-                            if direct_response and len(str(direct_response).strip()) > 20:
+                            if direct_response and len(str(direct_response).strip()) > MIN_RESPONSE_LENGTH:
                                 print("Doğrudan prompt yöntemi başarılı")
                                 return direct_response
                         except Exception as alt1_e:
@@ -745,9 +796,9 @@ def query_transcripts(question):
                         # İkinci düzeltme - Daha basit prompt ve daha az bağlam
                         try:
                             print("2. alternatif: Basitleştirilmiş model çağrısı")
-                            simple_input = f"Lütfen şu soruyu cevapla: {question}\n\nKullanılabilecek bilgiler:\n{context[:2000]}"
+                            simple_input = f"Lütfen şu soruyu cevapla: {question}\n\nKullanılabilecek bilgiler:\n{context[:FALLBACK_CONTEXT_LIMIT]}"
                             direct_response = model.invoke(simple_input)
-                            if direct_response and len(str(direct_response).strip()) > 20:
+                            if direct_response and len(str(direct_response).strip()) > MIN_RESPONSE_LENGTH:
                                 print("Basitleştirilmiş model çağrısı başarılı")
                                 return direct_response
                         except Exception as alt2_e:
@@ -762,7 +813,7 @@ def query_transcripts(question):
                                 top_p=0.8,
                                 num_predict=512
                             )
-                            minimal_prompt = f"SORU: {question}\nBİLGİLER: {context[:1000]}\nYANIT:"
+                            minimal_prompt = f"SORU: {question}\nBİLGİLER: {context[:EMERGENCY_CONTEXT_LIMIT]}\nYANIT:"
                             emergency_response = emergency_model.invoke(minimal_prompt)
                             if emergency_response:
                                 print("Acil durum modeli başarılı")
@@ -773,38 +824,48 @@ def query_transcripts(question):
                     # Tüm alternatifler başarısız olduğunda hatayı yükselt
                     print("Tüm LLM yanıt alternatifleri başarısız oldu")
                     raise inner_e
-              # Paralel işleme ile zaman aşımı kontrolü
-            with ThreadPoolExecutor() as executor:
-                future = executor.submit(get_llm_response)
+                    
+            # Streaming işlev kullanılıyorsa farklı işle
+            if stream_callback:
                 try:
-                    # Gelişmiş zaman aşımı kontrolü - progressif bekletme
-                    try:
-                        # İlk 30 saniye içinde yanıt gelirse hemen döndür
-                        llm_result = future.result(timeout=30)
-                    except TimeoutError:
-                        # 30 saniye içinde yanıt gelmezse kullanıcıya bilgi ver ve biraz daha bekle
-                        print("İlk 30 saniyelik yanıt süresi aşıldı, 30 saniye daha bekleniyor...")
-                        
-                        # Ana sistemi yavaşlatmamak için zaman aşımı sonrası kullanıcıya geri bildirim vermeye devam et
-                        try:
-                            llm_result = future.result(timeout=30)  # 30 saniye daha bekle
-                        except TimeoutError:
-                            print("Toplam 60 saniyelik zaman aşımı - LLM yanıtı alınamadı")
-                            raise TimeoutError("LLM yanıtı için maksimum süre (60 saniye) aşıldı.")
-                    
-                    # Yanıt kontrolü - geliştirilmiş güvenlik kontrolleri
-                    if llm_result is None:
-                        raise ValueError("LLM yanıtı None olarak döndü")
-                    
-                    # Boş ya da çok kısa yanıtlar için kontrol
-                    llm_result_str = str(llm_result).strip()
-                    if len(llm_result_str) < 10:
-                        raise ValueError(f"LLM geçersiz yanıt döndürdü (çok kısa yanıt: '{llm_result_str}')")
-                        
+                    # Stream modunda ThreadPool kullanma, çünkü stream_callback zaten paralel işleyecek
+                    llm_result = get_llm_response()
+                    # Stream modunda get_llm_response() None döndürecek, bu normal
                     stage_times["llm_yaniti"] = time.time() - llm_start
-                except TimeoutError:
-                    print("LLM yanıtı zaman aşımına uğradı.")
-                    raise Exception("Yanıt zaman aşımına uğradı. Lütfen tekrar deneyin veya hızlı yanıt modunu kullanın. Bu genellikle sistem yoğun olduğunda meydana gelir.")
+                except Exception as stream_e:
+                    print(f"Stream modunda LLM yanıtı alınırken hata: {stream_e}")
+                    raise stream_e
+            else:                # Normal mod - Paralel işleme ile zaman aşımı kontrolü
+                with ThreadPoolExecutor() as executor:
+                    future = executor.submit(get_llm_response)
+                    try:
+                        # Gelişmiş zaman aşımı kontrolü - progressif bekletme
+                        try:
+                            # İlk 30 saniye içinde yanıt gelirse hemen döndür
+                            llm_result = future.result(timeout=PRIMARY_TIMEOUT)
+                        except TimeoutError:
+                            # 30 saniye içinde yanıt gelmezse kullanıcıya bilgi ver ve biraz daha bekle
+                            print("İlk 30 saniyelik yanıt süresi aşıldı, 30 saniye daha bekleniyor...")
+                            
+                            # Ana sistemi yavaşlatmamak için zaman aşımı sonrası kullanıcıya geri bildirim vermeye devam et
+                            try:
+                                llm_result = future.result(timeout=SECONDARY_TIMEOUT)  # 30 saniye daha bekle
+                            except TimeoutError:
+                                print("Toplam 60 saniyelik zaman aşımı - LLM yanıtı alınamadı")
+                                raise TimeoutError("LLM yanıtı için maksimum süre (60 saniye) aşıldı.")
+                        
+                        # Yanıt kontrolü - geliştirilmiş güvenlik kontrolleri
+                        if llm_result is None:
+                            raise ValueError("LLM yanıtı None olarak döndü")
+                          # Boş ya da çok kısa yanıtlar için kontrol
+                        llm_result_str = str(llm_result).strip()
+                        if len(llm_result_str) < MIN_RESPONSE_LENGTH:
+                            raise ValueError(f"LLM geçersiz yanıt döndürdü (çok kısa yanıt: '{llm_result_str}')")
+                        
+                        stage_times["llm_yaniti"] = time.time() - llm_start
+                    except TimeoutError:
+                        print("LLM yanıtı zaman aşımına uğradı.")
+                        raise Exception("Yanıt zaman aşımına uğradı. Lütfen tekrar deneyin veya hızlı yanıt modunu kullanın. Bu genellikle sistem yoğun olduğunda meydana gelir.")
         except Exception as e:
             print(f"LLM yanıtı alınırken hata: {e}")
             import traceback
@@ -820,8 +881,8 @@ def query_transcripts(question):
             
             for i, doc in enumerate(docs[:7], 1):  # İlk 7 en alakalı belgeyi göster
                 source = doc.metadata.get('source', 'Bilinmiyor')
-                if len(source) > 40:  # Uzun dosya adlarını kısalt
-                    source = source[:37] + "..."
+                if len(source) > FILENAME_MAX_LENGTH:  # Uzun dosya adlarını kısalt
+                    source = source[:FILENAME_MAX_LENGTH-3] + "..."
                 
                 # Zaman bilgisini doğru şekilde al
                 time_info = doc.metadata.get('time', '')
@@ -832,7 +893,7 @@ def query_transcripts(question):
                         time_info = f"{start_time} - {end_time}"
                     else:
                         content = doc.page_content
-                        time_match = re.search(r"Time:\s*(\d+:\d+:\d+\s*-\s*\d+:\d+:\d+)", content)
+                        time_match = re.search(r"Time:\s*(\d+:\d+:\d+)", content)
                         if time_match:
                             time_info = time_match.group(1)
                         else:
@@ -894,13 +955,13 @@ def query_transcripts(question):
                     print(f"İlk fallback yöntemi başarısız: {e1}")
                     try:
                         # İkinci fallback yöntemi - çok daha basit bir yaklaşım
-                        direct_prompt = f"Soru: {question}\n\nBelgeler: {fallback_context[:1000]}\n\nLütfen bu soruya belgelerden alınan bilgilere dayanarak özet bir yanıt ver:"
+                        direct_prompt = f"Soru: {question}\n\nBelgeler: {fallback_context[:FALLBACK_CONTEXT_LIMIT]}\n\nLütfen bu soruya belgelerden alınan bilgilere dayanarak özet bir yanıt ver:"
                         fallback_result = model.invoke(direct_prompt)
                     except Exception as e2:
                         print(f"İkinci fallback yöntemi de başarısız: {e2}")                        # Belgeleri doğrudan göster
                         return simple_result
                 
-                if fallback_result and len(str(fallback_result).strip()) > 20:
+                if fallback_result and len(str(fallback_result).strip()) > MIN_RESPONSE_LENGTH:
                     return f"{fallback_result}\n\n[Not: Bu yanıt basitleştirilmiş bir yaklaşımla oluşturulmuştur. Detaylar için lütfen tekrar deneyin.]"
                 else:
                     print("Fallback yanıtı çok kısa veya boş")
@@ -911,7 +972,8 @@ def query_transcripts(question):
                 print("=== FALLBACK HATA DETAYLARI ===")
                 traceback.print_exc()
                 print("================================")
-                      # BASAMAKLI KURTARMA SİSTEMİ - son çare yaklaşımları
+            
+            # BASAMAKLI KURTARMA SİSTEMİ - son çare yaklaşımları
             # Safha 1: Daha sağlam doküman işleme ile acil durum modeli
             try:
                 print("Son çare yaklaşımı 1: Güvenli doküman işleme ile acil durum modeli...")
@@ -948,11 +1010,20 @@ def query_transcripts(question):
                     num_predict=1024,
                     repeat_penalty=1.2
                 )
+                  # Stream desteği ile emergency response
+                emergency_response = "[Not: Bu yanıt acil durum mekanizması ile oluşturulmuştur. Tam kapsamlı yanıt için lütfen tekrar deneyin.]"
                 
-                emergency_result = emergency_model.invoke(emergency_prompt)
-                if emergency_result and len(emergency_result.strip()) > 20:
-                    print("Son çare yaklaşımı 1 başarılı")
-                    return f"{emergency_result}\n\n[Not: Bu yanıt acil durum mekanizması ile oluşturulmuştur. Tam kapsamlı yanıt için lütfen tekrar deneyin.]"
+                # Stream callback varsa sonucu ilet ve None döndür
+                if stream_callback:
+                    emergency_result = stream_llm_response(emergency_model, emergency_prompt, stream_callback)
+                    stream_callback(emergency_response)
+                    return None
+                else:
+                    # Normal mod
+                    emergency_result = emergency_model.invoke(emergency_prompt)
+                    if emergency_result and len(emergency_result.strip()) > MIN_RESPONSE_LENGTH:
+                        print("Son çare yaklaşımı 1 başarılı")
+                        return f"{emergency_result}\n\n{emergency_response}"
             except Exception as last_e:
                 print(f"Son çare yaklaşımı 1 başarısız: {str(last_e)}")
             
@@ -967,12 +1038,21 @@ def query_transcripts(question):
                     num_predict=512
                 )
                 
-                minimal_prompt = f"Şu soruyu yanıtla: {question}"
-                minimal_result = minimal_model.invoke(minimal_prompt)
+                minimal_prompt = f"Şu soruyu yanıtla: {question}"                # Stream desteği ile minimal response
+                minimal_note = "\n\n[Not: Bu yanıt doğrudan soru yanıtlama mekanizması ile oluşturulmuştur. Belgelere dayalı yanıt için lütfen tekrar deneyin.]"
                 
-                if minimal_result and len(minimal_result.strip()) > 20:
-                    print("Son çare yaklaşımı 2 başarılı")
-                    return f"{minimal_result}\n\n[Not: Bu yanıt doğrudan soru yanıtlama mekanizması ile oluşturulmuştur. Belgelere dayalı yanıt için lütfen tekrar deneyin.]"
+                # Stream callback varsa sonucu ilet ve None döndür
+                if stream_callback:
+                    stream_llm_response(minimal_model, minimal_prompt, stream_callback)
+                    stream_callback(minimal_note)
+                    return None
+                else:
+                    # Normal mod
+                    minimal_result = minimal_model.invoke(minimal_prompt)
+                    
+                    if minimal_result and len(minimal_result.strip()) > MIN_RESPONSE_LENGTH:
+                        print("Son çare yaklaşımı 2 başarılı")
+                        return f"{minimal_result}{minimal_note}"
             except Exception as last2_e:
                 print(f"Son çare yaklaşımı 2 başarısız: {str(last2_e)}")
                 
@@ -986,9 +1066,9 @@ def query_transcripts(question):
                         ["ollama", "run", "llama3.1", f"'{question}' sorusunu yanıtla"],
                         capture_output=True, 
                         text=True, 
-                        timeout=15
+                        timeout=EMERGENCY_TIMEOUT
                     )
-                    if result.stdout and len(result.stdout) > 20:
+                    if result.stdout and len(result.stdout) > MIN_RESPONSE_LENGTH:
                         print("Son çare yaklaşımı 3 başarılı")
                         return f"{result.stdout}\n\n[Not: Bu yanıt acil durum komut satırı mekanizması ile oluşturulmuştur.]"
                 except Exception as cmd_e:
@@ -1002,35 +1082,62 @@ def query_transcripts(question):
         # Yanıt sonlandırma ve formatlamayı iyileştir
         formatting_start = time.time()
         
-        # Kullanılan kaynakları ekle - geliştirilmiş formatla
-        result = f"{llm_result}\n\n{format_sources(docs[:15])}"
+        # Stream modunda kaynak bilgilerini gönder
+        source_info = format_sources(docs[:15])
         
-        # Periyodik olarak bellek önbelleğini temizle
-        if len(memory_cache) % 10 == 0:
-            clear_memory_cache()
-        
-        # Belirli aralıklarla önbelleği diske kaydet
-        if len(query_cache) % 5 == 0:
-            save_cache()
-        
-        stage_times["sonlandirma"] = time.time() - formatting_start
-        
-        # İstatistikler
-        end_time = time.time()
-        process_time = end_time - start_time
-        
-        # Sorgu performans analizini göster
-        print(f"Sorgu işlendi. Toplam süre: {process_time:.2f} saniye")
-        print("İŞLEM SÜRELERİ:")
-        for stage, duration in stage_times.items():
-            print(f" - {stage}: {duration:.2f} saniye")
+        # Stream callback varsa ve henüz döndürülmediyse kaynakları ekle
+        if stream_callback:
+            stream_callback(f"\n\n{source_info}")
+            # Periyodik olarak bellek önbelleğini temizle
+            if len(memory_cache) % 10 == 0:
+                clear_memory_cache()
             
-        # Sonuç içeriği analizi
-        result_length = len(result)
-        source_count = result.count("📄")
-        print(f"Yanıt uzunluğu: {result_length} karakter, {source_count} kaynak kullanıldı")
-        
-        return result
+            # Belirli aralıklarla önbelleği diske kaydet
+            if len(query_cache) % DISK_CACHE_SAVE_INTERVAL == 0:
+                save_cache()
+            
+            # İstatistikler
+            end_time = time.time()
+            process_time = end_time - start_time
+            
+            # Sorgu performans analizini göster
+            print(f"Sorgu işlendi. Toplam süre: {process_time:.2f} saniye")
+            print("İŞLEM SÜRELERİ:")
+            for stage, duration in stage_times.items():
+                print(f" - {stage}: {duration:.2f} saniye")
+            
+            # Stream modunda None döndür
+            return None
+        else:
+            # Normal mod - Kullanılan kaynakları ekle - geliştirilmiş formatla
+            result = f"{llm_result}\n\n{source_info}"
+            
+            # Periyodik olarak bellek önbelleğini temizle
+            if len(memory_cache) % 10 == 0:
+                clear_memory_cache()
+            
+            # Belirli aralıklarla önbelleği diske kaydet
+            if len(query_cache) % DISK_CACHE_SAVE_INTERVAL == 0:
+                save_cache()
+            
+            stage_times["sonlandirma"] = time.time() - formatting_start
+            
+            # İstatistikler
+            end_time = time.time()
+            process_time = end_time - start_time
+            
+            # Sorgu performans analizini göster
+            print(f"Sorgu işlendi. Toplam süre: {process_time:.2f} saniye")
+            print("İŞLEM SÜRELERİ:")
+            for stage, duration in stage_times.items():
+                print(f" - {stage}: {duration:.2f} saniye")
+                
+            # Sonuç içeriği analizi
+            result_length = len(result)
+            source_count = result.count("📄")
+            print(f"Yanıt uzunluğu: {result_length} karakter, {source_count} kaynak kullanıldı")
+            
+            return result
         
     except Exception as e:
         error_message = f"Sorgu işlenirken beklenmeyen bir hata oluştu: {str(e)}"
@@ -1040,8 +1147,13 @@ def query_transcripts(question):
         return error_message
 
 # Hızlı yanıt modu - Optimize edildi
-def quick_query(question):
-    """Hızlı yanıt modu - daha az doküman ile hızlı yanıt"""
+def quick_query(question, stream_callback=None):
+    """Hızlı yanıt modu - daha az doküman ile hızlı yanıt
+    
+    Args:
+        question: Kullanıcı sorusu
+        stream_callback: Yanıtı parça parça işlemek için callback fonksiyonu
+    """
     print("Hızlı yanıt modu aktif...")
     # Mevcut ayarları sakla
     original_k = retriever.search_kwargs.get("k", 12)
@@ -1053,7 +1165,7 @@ def quick_query(question):
     
     # Hızlı sorgu yap
     try:
-        result = query_transcripts(question)
+        result = query_transcripts(question, stream_callback=stream_callback)
     finally:
         # Eski ayarları geri yükle
         retriever.search_kwargs["k"] = original_k

@@ -84,9 +84,17 @@ def main():
                 "content": "👋 Merhaba! Ben InspareAI, transkriptlerdeki bilgilere dayanarak sorularınızı yanıtlayabilirim. Nasıl yardımcı olabilirim?"
             })
         
-        # Animasyonlu yanıt fonksiyonu
+        # Akademik formatlı akış yanıt fonksiyonu
         def yapay_zeka_yaniti(prompt, hizli, dusunme):
             try:
+                full_response = []
+                
+                # Streamlit için streaming callback
+                def stream_to_streamlit(chunk):
+                    full_response.append(chunk)
+                    full_text = "".join(full_response)
+                    message_placeholder.markdown(full_text + "▌")
+                
                 if dusunme:
                     message_placeholder.markdown("🔍 Anahtar kelimeler analiz ediliyor...")
                     time.sleep(0.5)
@@ -95,17 +103,17 @@ def main():
                     message_placeholder.markdown("🔍 Anahtar kelimeler analiz ediliyor...\n📑 İlgili dokümanlar aranıyor...\n🧠 Yanıt oluşturuluyor...")
                     time.sleep(0.5)
                 
+                # Streaming yanıt alın
                 if hizli:
-                    response = quick_query(prompt)
+                    quick_query(prompt, stream_callback=stream_to_streamlit)
                 else:
-                    response = query_transcripts(prompt)
+                    query_transcripts(prompt, stream_callback=stream_to_streamlit)
                 
-                if dusunme:
-                    message_placeholder.markdown("✅ Yanıt hazır!\n\n" + response)
-                else:
-                    message_placeholder.markdown(response)
-                    
-                return response
+                # Stream tamamlandığında kürsörü kaldır
+                full_text = "".join(full_response)
+                message_placeholder.markdown(full_text)
+                
+                return full_text
                 
             except Exception as e:
                 error_message = f"⚠️ Hata: {str(e)}"
@@ -154,10 +162,10 @@ def main():
                 response = yapay_zeka_yaniti(prompt, hizli_mod, dusunme_sureci)
                 st.session_state.messages.append({"role": "assistant", "content": response})
         
-        # # Seçilen örnek soruyu işleme
-        # if "user_input" in st.session_state and st.session_state.user_input:
-        #     prompt = st.session_state.user_input
-        #     st.session_state.user_input = ""  # Tek seferlik kullan
+        # Seçilen örnek soruyu işleme
+        elif "user_input" in st.session_state and st.session_state.user_input:
+            prompt = st.session_state.user_input
+            st.session_state.user_input = ""  # Tek seferlik kullan
             
             # Kullanıcı mesajını ekle
             st.session_state.messages.append({"role": "user", "content": prompt})
@@ -204,44 +212,44 @@ def main():
         else:
             st.error("Transkript klasörü bulunamadı")
     
-    # # YARDIM GÖRÜNÜMÜ
-    # else:
-    #     st.subheader("ℹ️ InspareAI Kullanım Kılavuzu")
+    # YARDIM GÖRÜNÜMÜ
+    else:
+        st.subheader("ℹ️ InspareAI Kullanım Kılavuzu")
         
-    #     with st.expander("📌 Temel Kullanım", expanded=True):
-    #         st.markdown("""
-    #         - **Sohbet** bölümünde sorularınızı yazarak yapay zeka ile etkileşime geçebilirsiniz
-    #         - **Hızlı yanıt modu** ile daha az doküman kullanarak daha hızlı yanıtlar alabilirsiniz
-    #         - **Düşünme sürecini göster** seçeneği ile yapay zekanın çalışma adımlarını görebilirsiniz
-    #         - Örnek soruları kullanarak sistemi test edebilirsiniz
-    #         """)
+        with st.expander("📌 Temel Kullanım", expanded=True):
+            st.markdown("""
+            - **Sohbet** bölümünde sorularınızı yazarak yapay zeka ile etkileşime geçebilirsiniz
+            - **Hızlı yanıt modu** ile daha az doküman kullanarak daha hızlı yanıtlar alabilirsiniz
+            - **Düşünme sürecini göster** seçeneği ile yapay zekanın çalışma adımlarını görebilirsiniz
+            - Örnek soruları kullanarak sistemi test edebilirsiniz
+            """)
             
-    #     with st.expander("💡 İpuçları"):
-    #         st.markdown("""
-    #         - Spesifik sorular daha doğru yanıtlar almanızı sağlar
-    #         - Tarih, zaman aralığı veya konuşmacı belirtmek sonuçların kalitesini artırır
-    #         - Kronolojik analiz için soruda "kronoloji" veya "zaman sırası" ifadeleri kullanın
-    #         - Konuşmacıların görüşlerini öğrenmek için "Speaker A'nın ... hakkındaki görüşleri nedir?" formatını kullanın
-    #         """)
+        with st.expander("💡 İpuçları"):
+            st.markdown("""
+            - Spesifik sorular daha doğru yanıtlar almanızı sağlar
+            - Tarih, zaman aralığı veya konuşmacı belirtmek sonuçların kalitesini artırır
+            - Kronolojik analiz için soruda "kronoloji" veya "zaman sırası" ifadeleri kullanın
+            - Konuşmacıların görüşlerini öğrenmek için "Speaker A'nın ... hakkındaki görüşleri nedir?" formatını kullanın
+            """)
             
-    #     with st.expander("📂 Transkript Dosyaları"):
-    #         st.markdown("""
-    #         - **Transkript Yönetimi** bölümünden mevcut dosyaları listeleyebilir ve görüntüleyebilirsiniz
-    #         - Yeni transkript eklemek için `transcripts` klasörüne `.txt` uzantılı dosyalar ekleyin
-    #         - Transkript dosyalarının formatı aşağıdaki gibi olmalıdır:
-    #         ```
-    #         0:00:00 - 0:01:30 Speaker A: Konuşma metni...
-    #         0:01:31 - 0:02:15 Speaker B: Yanıt metni...
-    #         ```
-    #         """)
+        with st.expander("📂 Transkript Dosyaları"):
+            st.markdown("""
+            - **Transkript Yönetimi** bölümünden mevcut dosyaları listeleyebilir ve görüntüleyebilirsiniz
+            - Yeni transkript eklemek için `transcripts` klasörüne `.txt` uzantılı dosyalar ekleyin
+            - Transkript dosyalarının formatı aşağıdaki gibi olmalıdır:
+            ```
+            0:00:00 - 0:01:30 Speaker A: Konuşma metni...
+            0:01:31 - 0:02:15 Speaker B: Yanıt metni...
+            ```
+            """)
             
-    #     with st.expander("⚠️ Sorun Giderme"):
-    #         st.markdown("""
-    #         - **Yanıt alınamadığında** sorunuzu daha açık ifade etmeyi deneyin
-    #         - **Yavaş yanıtlar için** hızlı yanıt modunu kullanın
-    #         - **Hata mesajlarında** belirtilen sorunları giderin (model yüklenememe, veri bulunamama vb.)
-    #         - **Sistem çalışmazsa** terminal üzerinden `python main.py` komutu ile çalıştırın ve hata mesajlarını kontrol edin
-    #         """)
+        with st.expander("⚠️ Sorun Giderme"):
+            st.markdown("""
+            - **Yanıt alınamadığında** sorunuzu daha açık ifade etmeyi deneyin
+            - **Yavaş yanıtlar için** hızlı yanıt modunu kullanın
+            - **Hata mesajlarında** belirtilen sorunları giderin (model yüklenememe, veri bulunamama vb.)
+            - **Sistem çalışmazsa** terminal üzerinden `python main.py` komutu ile çalıştırın ve hata mesajlarını kontrol edin
+            """)
 
 if __name__ == "__main__":
     main()
