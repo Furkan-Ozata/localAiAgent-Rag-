@@ -26,8 +26,7 @@ scikit-learn>=1.3.0
 tqdm>=4.66.1
 psutil>=5.9.0
 
-# Web arayüzleri
-gradio>=3.50.2
+# Web arayüzü
 streamlit>=1.28.0
 
 # İlerleme ve izleme

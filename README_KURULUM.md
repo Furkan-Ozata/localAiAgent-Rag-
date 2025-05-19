@@ -119,11 +119,10 @@ Sistemi başlatmak için basitçe:
 ./run_inspareai.sh
 ```
 
-Bu, size üç farklı arayüz seçeneği sunar:
+Bu, size iki farklı arayüz seçeneği sunar:
 
 1. Komut Satırı (Terminal) Arayüzü
-2. Gradio Web Arayüzü
-3. Streamlit Chat Arayüzü
+2. Streamlit Chat Arayüzü
 
 ### Manuel Başlatma
 
@@ -135,15 +134,7 @@ Sistemi komut satırı arayüzü ile kullanmak için:
 python main.py
 ```
 
-#### Web Arayüzü (Gradio)
-
-Kullanıcı dostu web arayüzü ile kullanmak için:
-
-```bash
-python helpers.py
-```
-
-#### Sohbet Arayüzü (Streamlit)
+#### Web Arayüzü (Streamlit)
 
 Modern, sohbet tabanlı bir arayüzle kullanmak için:
 

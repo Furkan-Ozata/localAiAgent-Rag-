@@ -84,11 +84,10 @@ echo ""
 # Arayüz seçimi
 echo -e "${BLUE}InspareAI'yi hangi arayüzle başlatmak istersiniz?${NC}"
 echo "1) Komut Satırı (Terminal)"
-echo "2) Gradio Web Arayüzü"
-echo "3) Streamlit Chat Arayüzü"
-echo "4) Çıkış"
+echo "2) Streamlit Chat Arayüzü"
+echo "3) Çıkış"
 
-read -p "Seçiminiz (1-4): " choice
+read -p "Seçiminiz (1-3): " choice
 
 case $choice in
     1)
@@ -96,14 +95,10 @@ case $choice in
         python main.py
         ;;
     2)
-        echo -e "\n${GREEN}Gradio web arayüzü başlatılıyor...${NC}"
-        python helpers.py
-        ;;
-    3)
         echo -e "\n${GREEN}Streamlit chat arayüzü başlatılıyor...${NC}"
         streamlit run streamlit_app.py
         ;;
-    4)
+    3)
         echo -e "\n${YELLOW}İyi günler!${NC}"
         exit 0
         ;;
