@@ -18,7 +18,7 @@ def stream_query(prompt: str, callback: Callable, hizli_mod: bool = False, dusun
     Sorguyu akış şeklinde yanıtlar ve aşamaları gösterir.
     
     Args:
-        prompt (str): Kullanıcı sorusu
+        prompt (str): Kullanıcı sorusu veya konuşma geçmişiyle birlikte bağlamlı soru
         callback (Callable): Her bir aşama için çağrılacak callback fonksiyonu
         hizli_mod (bool): Hızlı yanıt modu aktif mi
         dusunme_sureci (bool): Düşünme sürecinin gösterilip gösterilmeyeceği
@@ -33,16 +33,38 @@ def stream_query(prompt: str, callback: Callable, hizli_mod: bool = False, dusun
         full_response.append(chunk)
         full_text = "".join(full_response)
         callback(full_text + "▌")
+        
+    # Bağlamlı soru mu kontrol et
+    has_conversation_context = "konuşma geçmişini dikkate alarak" in prompt.lower()
     
     # Düşünme süreci aşamaları
     if dusunme_sureci:
+        if has_conversation_context:
+            callback("💬 Konuşma geçmişi analiz ediliyor...")
+            time.sleep(0.5)
+            callback("💬 Konuşma geçmişi analiz ediliyor...\n🔄 Bağlam ilişkilendiriliyor...")
+            time.sleep(0.5)
+        
         callback("🔍 Anahtar kelimeler analiz ediliyor...")
         time.sleep(0.5)
-        callback("🔍 Anahtar kelimeler analiz ediliyor...\n📑 İlgili dokümanlar aranıyor...")
+        callback(("🔍 Anahtar kelimeler analiz ediliyor...\n"
+                "📑 İlgili dokümanlar aranıyor..."))
         time.sleep(0.5)
-        callback("🔍 Anahtar kelimeler analiz ediliyor...\n📑 İlgili dokümanlar aranıyor...\n📋 Dokümanlar filtreleniyor...")
+        callback(("🔍 Anahtar kelimeler analiz ediliyor...\n"
+                "📑 İlgili dokümanlar aranıyor...\n"
+                "📋 Dokümanlar filtreleniyor..."))
         time.sleep(0.5)
-        callback("🔍 Anahtar kelimeler analiz ediliyor...\n📑 İlgili dokümanlar aranıyor...\n📋 Dokümanlar filtreleniyor...\n🧠 Yanıt oluşturuluyor...\n\n")
+        
+        if has_conversation_context:
+            callback(("🔍 Anahtar kelimeler analiz ediliyor...\n"
+                    "📑 İlgili dokümanlar aranıyor...\n"
+                    "📋 Dokümanlar filtreleniyor...\n"
+                    "🧠 Önceki konuşma bağlamıyla yanıt oluşturuluyor...\n\n"))
+        else:
+            callback(("🔍 Anahtar kelimeler analiz ediliyor...\n"
+                    "📑 İlgili dokümanlar aranıyor...\n"
+                    "📋 Dokümanlar filtreleniyor...\n"
+                    "🧠 Yanıt oluşturuluyor...\n\n"))
         time.sleep(0.5)
     
     # Sorgu işleme
