@@ -109,6 +109,30 @@ python vector.py --force --dynamic-chunking
 python vector.py --no-cache --parallel
 ```
 
+## 📂 Proje Yapısı
+
+InspareAI modüler bir mimariye sahiptir:
+
+```
+inspareai/
+├── __init__.py
+├── config/             # Yapılandırma dosyaları
+│   ├── constants.py    # Sabitler ve limitleri içerir
+│   └── prompts.py      # LLM için şablonlar
+├── core/               # Ana işlevsellik
+│   ├── model.py        # LLM modeli oluşturma ve yönetme
+│   ├── query.py        # Sorgu işleme mantığı
+│   └── retrieval.py    # Belge getirme ve hazırlama
+├── utils/              # Yardımcı araçlar
+│   ├── cache.py        # Önbellek yönetimi
+│   ├── streaming.py    # Akış yanıt oluşturma
+│   └── text.py         # Metin işleme fonksiyonları
+├── cli/                # Komut satırı arayüzü
+│   └── command_handler.py # CLI komut işleme
+└── api/                # Web API ve Streamlit entegrasyonu
+    └── streamlit_handler.py # Streamlit arayüz işleyicisi
+```
+
 ## 🚀 Kullanım
 
 ### Kolay Başlatma
@@ -117,6 +141,12 @@ Sistemi başlatmak için basitçe:
 
 ```bash
 ./run_inspareai.sh
+```
+
+veya:
+
+```bash
+./scripts/run_inspareai.sh
 ```
 
 Bu, size iki farklı arayüz seçeneği sunar:
@@ -209,13 +239,61 @@ Sistem performansını artırmak için:
 - **Yavaş yanıtlar**: `!` ile başlayan hızlı yanıt modunu kullanın veya Gradio/Streamlit arayüzünde "Hızlı yanıt modu" seçeneğini etkinleştirin
 - **Bellek Yetersizliği**: `vector.py` çalıştırırken bellek hatası alıyorsanız, `python vector.py --chunk-size 600 --overlap 100` ile daha küçük chunk boyutlarıyla çalıştırın
 
+## 🧑‍💻 Geliştiriciler İçin Bilgiler
+
+### Proje Kurulumu
+
+Geliştirme ortamınızı ayarlamak için:
+
+```bash
+# Depoyu klonlayın
+git clone https://github.com/your-username/inspareAI-localagent.git
+cd inspareAI-localagent
+
+# Sanal ortam oluşturun
+python -m venv venv
+source venv/bin/activate  # Unix/macOS
+# veya
+venv\Scripts\activate  # Windows
+
+# Geliştirici bağımlılıklarını kurun
+pip install -e ".[dev]"
+
+# Embedding modelleri için ekstra bağımlılıklar (isteğe bağlı)
+pip install -e ".[embeddings]"
+```
+
+### Modüler Yapı
+
+Yeni geliştirme yaparken modüler yapıyı takip edin:
+
+- `inspareai/config/`: Yapılandırma, sabitler ve promptlar
+- `inspareai/core/`: Temel işlevsellik (model, query, retrieval)
+- `inspareai/utils/`: Yardımcı işlevler (cache, text, streaming)
+- `inspareai/cli/`: Komut satırı arayüzü
+- `inspareai/api/`: Streamlit arayüzü
+
+### Test ve Kalite
+
+Testleri çalıştırmak için:
+
+```bash
+pytest tests/
+```
+
+Kod formatını kontrol etmek için:
+
+```bash
+black inspareai/ tests/ main.py
+```
+
 ## 🔄 Güncelleme ve Bakım
 
 Sistem güncellemelerinden sonra:
 
 1. Önce güncel kodu çekin veya indirin
-2. Bağımlılıkları güncelleyin: `pip install -r requirements.txt --upgrade`
-3. Vektör veritabanını yenileyin: `python vector.py --force`
+2. Bağımlılıkları güncelleyin: `pip install -e .`
+3. Vektör veritabanını yenileyin: `python scripts/build_vectordb.py --force`
 4. Önbellekleri temizleyin: Terminal'de `rm -rf embedding_cache` ve ardından uygulamada `temizle` komutu ile
 
 ## 🔒 Güvenlik ve Gizlilik
@@ -223,6 +301,27 @@ Sistem güncellemelerinden sonra:
 - Tüm işleme yerel olarak yapılır, veriler dışarı gönderilmez
 - Transkript dosyalarınız yalnızca kendi bilgisayarınızda işlenir
 - Herhangi bir internet bağlantısı gerektirmez (modelleriniz zaten indirilmişse)
+
+## 👥 Katkıda Bulunma
+
+InspareAI'ye katkıda bulunmak istiyorsanız:
+
+1. Depoyu forklayın
+2. Yeni bir özellik dalı oluşturun (`git checkout -b yeni-ozellik`)
+3. Değişikliklerinizi commit edin (`git commit -am 'Yeni özellik: X eklendi'`)
+4. Dalınıza push edin (`git push origin yeni-ozellik`)
+5. Pull Request açın
+
+Katkı sağlarken lütfen şunları göz önünde bulundurun:
+
+- Mevcut modüler yapıyı takip edin
+- Katkılarınızla ilgili testler ekleyin
+- Değişikliklerinizi belgeleyin
+- Türkçe dili desteği ile ilgili özellikleri önceliklendirin
+
+## 📃 Lisans
+
+[MIT Lisansı](LICENSE) altında lisanslanmıştır.
 
 ---
 

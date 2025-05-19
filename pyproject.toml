@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inspareai-localagent"
+version = "1.0.0"
+description = "InspareAI Türkçe Transkript Analiz Sistemi"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "InspareAI Takımı"}
+]
+keywords = ["ai", "nlp", "turkish", "vector-database", "transcript-analysis"]
+dependencies = [
+    # requirements.txt içeriğini buraya ekleyebilirsiniz
+]
+
+[project.scripts]
+inspareai = "inspareai.cli:main"
+
+[tool.pytest]
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 88
+target-version = ["py38"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.ruff]
+line-length = 88
+target-version = "py38"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "black>=22.1",
+    "isort>=5.10.1",
+    "ruff>=0.0.85",
+]
+
+[tool.setuptools]
+package-dir = {"" = "."}
+packages = ["inspareai"]
+
+# Bu bölüm özel script komutları tanımlamak için eklendi
+[tool.inspareai.scripts]
+start = "python main.py"
+web = "streamlit run streamlit_app.py"
+build-vector = "python scripts/build_vectordb.py --force"
+build-vector-dynamic = "python scripts/build_vectordb.py --force --dynamic-chunking"
+test = "python -m pytest tests/"
+test-modular = "python tests/test_modular.py"
+clean = "rm -rf embedding_cache/* query_cache.json"
+install-deps = "./scripts/install_dependencies.sh"
+check-modules = "python -c \"import inspareai; print(f'InspareAI: {inspareai.__version__} by {inspareai.__author__}'); print('Modüler yapı başarıyla yüklendi!')\""
+status = "python --version"

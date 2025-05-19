@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 """
 Streaming işlemleri için yardımcı fonksiyonlar
 Bu modül, InspareAI'nin streaming yanıt oluşturma yeteneklerini yönetir.

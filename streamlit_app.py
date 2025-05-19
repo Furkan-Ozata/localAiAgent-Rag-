@@ -1,8 +1,22 @@
 
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+InspareAI - Streamlit Web Arayüzü.
+Bu modül, InspareAI'nin web tabanlı kullanıcı arayüzünü sağlar.
+"""
+
 import streamlit as st
 import time
 import os
-from main import query_transcripts, quick_query, view_transcript, list_transcript_files
+import sys
+
+# Modüler yapıyı kullanılabilir hale getirmek için dizin ekle
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Modüler API fonksiyonlarını içe aktar
+from inspareai.api.streamlit_handler import stream_query, get_transcript_list, get_transcript_content
 
 def main():
     """InspareAI için geliştirilmiş Streamlit tabanlı web arayüzü"""
@@ -84,36 +98,16 @@ def main():
                 "content": "👋 Merhaba! Ben InspareAI, transkriptlerdeki bilgilere dayanarak sorularınızı yanıtlayabilirim. Nasıl yardımcı olabilirim?"
             })
         
-        # Akademik formatlı akış yanıt fonksiyonu
+        # Yanıt fonksiyonu - modüler API kullanarak
         def yapay_zeka_yaniti(prompt, hizli, dusunme):
             try:
-                full_response = []
+                # Streamlit için callback tanımı
+                def update_ui(text):
+                    message_placeholder.markdown(text)
                 
-                # Streamlit için streaming callback
-                def stream_to_streamlit(chunk):
-                    full_response.append(chunk)
-                    full_text = "".join(full_response)
-                    message_placeholder.markdown(full_text + "▌")
-                
-                if dusunme:
-                    message_placeholder.markdown("🔍 Anahtar kelimeler analiz ediliyor...")
-                    time.sleep(0.5)
-                    message_placeholder.markdown("🔍 Anahtar kelimeler analiz ediliyor...\n📑 İlgili dokümanlar aranıyor...")
-                    time.sleep(0.7)
-                    message_placeholder.markdown("🔍 Anahtar kelimeler analiz ediliyor...\n📑 İlgili dokümanlar aranıyor...\n🧠 Yanıt oluşturuluyor...")
-                    time.sleep(0.5)
-                
-                # Streaming yanıt alın
-                if hizli:
-                    quick_query(prompt, stream_callback=stream_to_streamlit)
-                else:
-                    query_transcripts(prompt, stream_callback=stream_to_streamlit)
-                
-                # Stream tamamlandığında kürsörü kaldır
-                full_text = "".join(full_response)
-                message_placeholder.markdown(full_text)
-                
-                return full_text
+                # Modüler API fonksiyonunu kullan
+                result = stream_query(prompt, update_ui, hizli, dusunme)
+                return result
                 
             except Exception as e:
                 error_message = f"⚠️ Hata: {str(e)}"

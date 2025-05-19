@@ -36,6 +36,9 @@ chrome_langchain_db/
 query_cache.json
 analysis_results/
 .DS_Store
+embedding_cache/
+*.sqlite3
+*.bin
 
 # Logs
 *.log 
