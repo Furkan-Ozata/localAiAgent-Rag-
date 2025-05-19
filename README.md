@@ -1,4 +1,4 @@
-# InspareAI Türkçe Transkript Analiz Sistemi - Kurulum Kılavuzu
+# InspareAI Türkçe Transkript Analiz Sistemi
 
 <div align="center">
   <img src="https://img.shields.io/badge/Sürüm-3.2-blue" alt="Sürüm">
