@@ -375,6 +375,10 @@ def main():
         if "active_chat_id" not in st.session_state:
             st.session_state.active_chat_id = "Ana Sohbet"
             
+        # Son soru takibi için session state
+        if "last_question" not in st.session_state:
+            st.session_state.last_question = None
+            
         # Yeni sohbet butonu - özel stil ile
         st.markdown("""
         <style>
@@ -599,6 +603,11 @@ def main():
                 
                 # Modüler API fonksiyonunu kullan
                 result = stream_query(prompt, update_ui, hizli, dusunme)
+                
+                # İmleç karakterini temizle
+                if result and "▌" in result:
+                    result = result.replace("▌", "")
+                
                 return result
                 
             except Exception as e:
@@ -733,8 +742,13 @@ def main():
         with messages_container:
             st.markdown('<div class="messages-history-container">', unsafe_allow_html=True)
             for idx, message in enumerate(active_messages):
+                # İmleç karakterini temizle
+                content = message["content"]
+                if content and "▌" in content:
+                    content = content.replace("▌", "")
+                
                 with st.chat_message(message["role"]):
-                    st.markdown(message["content"])
+                    st.markdown(content)
             st.markdown('</div>', unsafe_allow_html=True)
         
         # Tema uyumlu kullanıcı girişi
@@ -757,12 +771,24 @@ def main():
         
         # Kullanıcı girişi - daha sade ve etkili yaklaşımla
         if prompt := st.chat_input("Sorunuzu yazın...", key=f"user_input_{len(active_messages)}"):
-            # Kullanıcı mesajını göster
-            with st.chat_message("user"):
-                st.markdown(prompt)
+            # Tekrarları önlemek için son soruyu kontrol et
+            last_question = None
+            if "last_question" not in st.session_state:
+                st.session_state.last_question = None
                 
-            # Kullanıcı mesajını session state'e kaydet
-            active_messages.append({"role": "user", "content": prompt})
+            last_question = st.session_state.last_question
+            
+            # Eğer bu yeni bir soru ise (tekrar değilse) işle
+            if last_question != prompt:
+                # Son soruyu kaydet
+                st.session_state.last_question = prompt
+                
+                # Kullanıcı mesajını göster
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+                    
+                # Kullanıcı mesajını session state'e kaydet
+                active_messages.append({"role": "user", "content": prompt})
             
             # Konuşma geçmişini hazırla (Bağlam için)
             context = ""
@@ -777,21 +803,32 @@ def main():
             with st.chat_message("assistant"):
                 message_placeholder = st.empty()
                 response = yapay_zeka_yaniti(enhanced_prompt, hizli_mod, dusunme_sureci)
+                
+                # İmleç karakterini temizle
+                if response and "▌" in response:
+                    response = response.replace("▌", "")
+                
                 active_messages.append({"role": "assistant", "content": response})
                 
-            # Bir sonraki soruya geçmek için sayfayı güncelle ama kullanıcı sorusunu gösterdik
+            # Sayfayı yeniden yükle (tekrarı önlemek için)
+            st.rerun()
         
         # Seçilen örnek soruyu işleme
         elif "user_input" in st.session_state and st.session_state.user_input:
             prompt = st.session_state.user_input
             st.session_state.user_input = ""  # Tek seferlik kullan
             
-            # Kullanıcı mesajını göster
-            with st.chat_message("user"):
-                st.markdown(prompt)
+            # Tekrarları önle
+            if st.session_state.last_question != prompt:
+                # Son soruyu kaydet
+                st.session_state.last_question = prompt
                 
-            # Kullanıcı mesajını ekle
-            active_messages.append({"role": "user", "content": prompt})
+                # Kullanıcı mesajını göster
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+                    
+                # Kullanıcı mesajını ekle
+                active_messages.append({"role": "user", "content": prompt})
             
             # Konuşma geçmişini hazırla (Bağlam için) 
             context = ""
@@ -806,6 +843,11 @@ def main():
             with st.chat_message("assistant"):
                 message_placeholder = st.empty()
                 response = yapay_zeka_yaniti(enhanced_prompt, hizli_mod, dusunme_sureci)
+                
+                # İmleç karakterini temizle
+                if response and "▌" in response:
+                    response = response.replace("▌", "")
+                
                 active_messages.append({"role": "assistant", "content": response})
                 
             # Sayfayı güncelle

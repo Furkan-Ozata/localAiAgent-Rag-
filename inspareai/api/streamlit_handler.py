@@ -28,11 +28,14 @@ def stream_query(prompt: str, callback: Callable, hizli_mod: bool = False, dusun
     """
     full_response = []
     
+    # İmleç karakteri tanımla
+    cursor_character = "▌"
+    
     # Akış callback tanımı
     def stream_to_callback(chunk):
         full_response.append(chunk)
         full_text = "".join(full_response)
-        callback(full_text + "▌")
+        callback(full_text + cursor_character)
         
     # Bağlamlı soru mu kontrol et
     has_conversation_context = "konuşma geçmişini dikkate alarak" in prompt.lower()
@@ -78,7 +81,11 @@ def stream_query(prompt: str, callback: Callable, hizli_mod: bool = False, dusun
         callback(result)
         return result
     
-    return "".join(full_response)
+    # Son yanıtı, imleç karakteri olmadan göndererek işlemi tamamla
+    final_response = "".join(full_response)
+    callback(final_response)  # İmleçsiz son halini göster
+    
+    return final_response
 
 
 def get_transcript_list() -> List[str]:
